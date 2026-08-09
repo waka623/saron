@@ -4,12 +4,16 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { requireCurrentSalon } from "@/lib/auth/current-salon";
 import { createClient } from "@/lib/supabase/server";
+import { idleState, type ActionState } from "@/lib/action-state";
 
-export async function createCustomer(formData: FormData) {
+export async function createCustomer(
+  _prevState: ActionState,
+  formData: FormData
+): Promise<ActionState> {
   const { salon } = await requireCurrentSalon();
 
   const name = String(formData.get("name") ?? "").trim();
-  if (!name) return;
+  if (!name) return { status: "error", message: "お名前を入力してください" };
 
   const phone = String(formData.get("phone") ?? "").trim() || null;
   const birthday = String(formData.get("birthday") ?? "").trim() || null;
@@ -23,18 +27,21 @@ export async function createCustomer(formData: FormData) {
     .single();
 
   if (error || !data) {
-    throw new Error(error?.message ?? "顧客の登録に失敗しました");
+    return { status: "error", message: error?.message ?? "顧客の登録に失敗しました" };
   }
 
   revalidatePath("/customers");
   redirect(`/customers/${data.id}`);
 }
 
-export async function addVisitRecord(formData: FormData) {
+export async function addVisitRecord(
+  _prevState: ActionState,
+  formData: FormData
+): Promise<ActionState> {
   const { salon } = await requireCurrentSalon();
 
   const customerId = String(formData.get("customerId") ?? "");
-  if (!customerId) return;
+  if (!customerId) return idleState;
 
   const visitDate = String(formData.get("visitDate") ?? "").trim();
   const menu = String(formData.get("menu") ?? "").trim() || null;
@@ -50,9 +57,10 @@ export async function addVisitRecord(formData: FormData) {
   });
 
   if (error) {
-    throw new Error(error.message);
+    return { status: "error", message: error.message };
   }
 
   revalidatePath(`/customers/${customerId}`);
   revalidatePath("/dashboard");
+  return { status: "success", message: "来店記録を追加しました" };
 }

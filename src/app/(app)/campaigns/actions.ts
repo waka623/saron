@@ -5,8 +5,12 @@ import { requireCurrentSalon } from "@/lib/auth/current-salon";
 import { createClient } from "@/lib/supabase/server";
 import { runCampaignsForSalon } from "@/lib/campaigns/run";
 import type { CampaignType } from "@/types/database";
+import type { ActionState } from "@/lib/action-state";
 
-export async function createCampaign(formData: FormData) {
+export async function createCampaign(
+  _prevState: ActionState,
+  formData: FormData
+): Promise<ActionState> {
   const { salon } = await requireCurrentSalon();
 
   const name = String(formData.get("name") ?? "").trim();
@@ -14,8 +18,12 @@ export async function createCampaign(formData: FormData) {
   const messageTemplate = String(formData.get("messageTemplate") ?? "").trim();
   const daysRaw = String(formData.get("daysSinceLastVisit") ?? "").trim();
 
-  if (!name || !messageTemplate) return;
-  if (!["birthday", "no_visit_reminder", "custom"].includes(type)) return;
+  if (!name || !messageTemplate) {
+    return { status: "error", message: "配信名とメッセージ本文を入力してください" };
+  }
+  if (!["birthday", "no_visit_reminder", "custom"].includes(type)) {
+    return { status: "error", message: "配信の種類を選択してください" };
+  }
 
   const daysSinceLastVisit =
     type === "no_visit_reminder" && daysRaw ? Number.parseInt(daysRaw, 10) : null;
@@ -30,9 +38,10 @@ export async function createCampaign(formData: FormData) {
     is_active: true,
   });
 
-  if (error) throw new Error(error.message);
+  if (error) return { status: "error", message: error.message };
 
   revalidatePath("/campaigns");
+  return { status: "success", message: "配信ルールを作成しました" };
 }
 
 export async function toggleCampaign(campaignId: string, isActive: boolean) {
@@ -50,8 +59,16 @@ export async function toggleCampaign(campaignId: string, isActive: boolean) {
   revalidatePath("/campaigns");
 }
 
-export async function runCampaignsNow() {
+export async function runCampaignsNow(): Promise<ActionState> {
   const { salon } = await requireCurrentSalon();
-  await runCampaignsForSalon(salon.id);
+  const result = await runCampaignsForSalon(salon.id);
   revalidatePath("/campaigns");
+
+  if (result.sent + result.skipped + result.failed === 0) {
+    return { status: "success", message: "本日配信対象のお客様はいませんでした" };
+  }
+  return {
+    status: result.failed > 0 ? "error" : "success",
+    message: `送信 ${result.sent}件 / スキップ ${result.skipped}件 / 失敗 ${result.failed}件`,
+  };
 }

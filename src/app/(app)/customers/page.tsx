@@ -1,7 +1,11 @@
 import Link from "next/link";
 import { requireCurrentSalon } from "@/lib/auth/current-salon";
 import { createClient } from "@/lib/supabase/server";
-import { createCustomer } from "./actions";
+import { PageHeader } from "@/components/ui/page-header";
+import { Card } from "@/components/ui/card";
+import { EmptyState } from "@/components/ui/empty-state";
+import { IconUsers, IconSearch } from "@/components/icons";
+import { NewCustomerForm } from "./new-customer-form";
 
 export default async function CustomersPage({
   searchParams,
@@ -23,117 +27,83 @@ export default async function CustomersPage({
   }
 
   const { data: customers } = await query;
+  const list = customers ?? [];
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold text-neutral-900">顧客・カルテ</h1>
-          <p className="mt-1 text-sm text-neutral-500">
-            登録数: {customers?.length ?? 0}名
-          </p>
-        </div>
-      </div>
+      <PageHeader title="顧客・カルテ" subtitle={`登録数: ${list.length}名`} />
 
-      <form method="get" className="flex gap-2">
+      <form method="get" className="relative max-w-xs">
+        <IconSearch className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-stone-400" />
         <input
           type="text"
           name="q"
           defaultValue={q ?? ""}
           placeholder="名前で検索"
-          className="w-64 rounded-md border border-neutral-300 px-3 py-2 text-sm focus:border-neutral-900 focus:outline-none"
+          className="w-full rounded-lg border border-stone-300 py-2 pl-9 pr-3 text-sm focus:border-rose-500 focus:outline-none focus:ring-1 focus:ring-rose-500"
         />
-        <button
-          type="submit"
-          className="rounded-md border border-neutral-300 px-4 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-100"
-        >
-          検索
-        </button>
       </form>
 
-      <details className="rounded-xl border border-neutral-200 bg-white shadow-sm">
-        <summary className="cursor-pointer select-none px-5 py-4 text-sm font-semibold text-neutral-900">
-          + 新しい顧客を登録
-        </summary>
-        <form action={createCustomer} className="space-y-4 border-t border-neutral-100 px-5 py-4">
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div>
-              <label className="block text-sm font-medium text-neutral-700">お名前</label>
-              <input
-                name="name"
-                required
-                className="mt-1 w-full rounded-md border border-neutral-300 px-3 py-2 text-sm focus:border-neutral-900 focus:outline-none"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-neutral-700">電話番号</label>
-              <input
-                name="phone"
-                className="mt-1 w-full rounded-md border border-neutral-300 px-3 py-2 text-sm focus:border-neutral-900 focus:outline-none"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-neutral-700">誕生日</label>
-              <input
-                name="birthday"
-                type="date"
-                className="mt-1 w-full rounded-md border border-neutral-300 px-3 py-2 text-sm focus:border-neutral-900 focus:outline-none"
-              />
-            </div>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-neutral-700">
-              メモ（アレルギー、要望など）
-            </label>
-            <textarea
-              name="notes"
-              rows={2}
-              className="mt-1 w-full rounded-md border border-neutral-300 px-3 py-2 text-sm focus:border-neutral-900 focus:outline-none"
-            />
-          </div>
-          <button
-            type="submit"
-            className="rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white hover:bg-neutral-800"
-          >
-            登録する
-          </button>
-        </form>
-      </details>
+      <NewCustomerForm />
 
-      <div className="overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-sm">
-        <table className="w-full text-left text-sm">
-          <thead className="bg-neutral-50 text-xs font-medium uppercase text-neutral-500">
-            <tr>
-              <th className="px-5 py-3">お名前</th>
-              <th className="px-5 py-3">電話番号</th>
-              <th className="px-5 py-3">誕生日</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-neutral-100">
-            {(customers ?? []).length === 0 && (
-              <tr>
-                <td colSpan={3} className="px-5 py-6 text-center text-neutral-400">
-                  顧客が登録されていません
-                </td>
-              </tr>
-            )}
-            {(customers ?? []).map((customer) => (
-              <tr key={customer.id} className="hover:bg-neutral-50">
-                <td className="px-5 py-3">
+      <Card className="overflow-hidden">
+        {list.length === 0 ? (
+          <EmptyState
+            icon={<IconUsers className="h-10 w-10" />}
+            title={q ? "該当する顧客が見つかりません" : "まだ顧客が登録されていません"}
+            description={q ? undefined : "上の「新しい顧客を登録」から最初のお客様を追加しましょう"}
+          />
+        ) : (
+          <>
+            {/* Mobile: card list */}
+            <ul className="divide-y divide-stone-100 sm:hidden">
+              {list.map((customer) => (
+                <li key={customer.id}>
                   <Link
                     href={`/customers/${customer.id}`}
-                    className="font-medium text-neutral-900 hover:underline"
+                    className="flex items-center justify-between px-5 py-3 active:bg-stone-50"
                   >
-                    {customer.name}
+                    <div>
+                      <p className="text-sm font-medium text-stone-900">{customer.name}</p>
+                      <p className="text-xs text-stone-500">{customer.phone ?? "電話番号未登録"}</p>
+                    </div>
+                    <p className="text-xs text-stone-400">{customer.birthday ?? ""}</p>
                   </Link>
-                </td>
-                <td className="px-5 py-3 text-neutral-600">{customer.phone ?? "-"}</td>
-                <td className="px-5 py-3 text-neutral-600">{customer.birthday ?? "-"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+                </li>
+              ))}
+            </ul>
+
+            {/* Desktop: table */}
+            <div className="hidden overflow-x-auto sm:block">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-stone-50 text-xs font-medium uppercase text-stone-500">
+                  <tr>
+                    <th className="px-5 py-3">お名前</th>
+                    <th className="px-5 py-3">電話番号</th>
+                    <th className="px-5 py-3">誕生日</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-stone-100">
+                  {list.map((customer) => (
+                    <tr key={customer.id} className="hover:bg-stone-50">
+                      <td className="px-5 py-3">
+                        <Link
+                          href={`/customers/${customer.id}`}
+                          className="font-medium text-stone-900 hover:text-rose-700 hover:underline"
+                        >
+                          {customer.name}
+                        </Link>
+                      </td>
+                      <td className="px-5 py-3 text-stone-600">{customer.phone ?? "-"}</td>
+                      <td className="px-5 py-3 text-stone-600">{customer.birthday ?? "-"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </Card>
     </div>
   );
 }

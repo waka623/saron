@@ -1,6 +1,8 @@
 import { headers } from "next/headers";
 import { requireCurrentSalon } from "@/lib/auth/current-salon";
-import { saveLineSettings } from "./actions";
+import { PageHeader } from "@/components/ui/page-header";
+import { Card } from "@/components/ui/card";
+import { LineSettingsForm } from "./line-settings-form";
 
 export default async function LineSettingsPage() {
   const { salon } = await requireCurrentSalon();
@@ -10,75 +12,54 @@ export default async function LineSettingsPage() {
   const webhookUrl = `${protocol}://${host}/api/line/webhook/${salon.id}`;
 
   return (
-    <div className="max-w-2xl space-y-8">
-      <div>
-        <h1 className="text-2xl font-semibold text-neutral-900">LINE連携設定</h1>
-        <p className="mt-1 text-sm text-neutral-500">
-          LINE公式アカウント（Messaging API）のチャネル情報を登録してください
-        </p>
-      </div>
+    <div className="max-w-2xl space-y-6">
+      <PageHeader
+        title="LINE連携設定"
+        subtitle="LINE公式アカウント（Messaging API）のチャネル情報を登録してください"
+      />
 
-      <div className="rounded-xl border border-neutral-200 bg-white p-5 text-sm shadow-sm">
-        <p className="font-medium text-neutral-900">1. Webhook URLを設定</p>
-        <p className="mt-1 text-neutral-500">
+      <Card className="p-5 text-sm">
+        <p className="flex items-center gap-2 font-medium text-stone-900">
+          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-rose-100 text-xs text-rose-700">
+            1
+          </span>
+          Webhook URLを設定
+        </p>
+        <p className="mt-2 text-stone-500">
           LINE Developersコンソールの「Messaging API設定」→「Webhook URL」に以下を貼り付け、
           Webhookの利用を「オン」にしてください。
         </p>
-        <p className="mt-3 break-all rounded-md bg-neutral-100 px-4 py-2 font-mono text-xs text-neutral-900">
+        <p className="mt-3 break-all rounded-lg bg-stone-100 px-4 py-2 font-mono text-xs text-stone-900">
           {webhookUrl}
         </p>
-      </div>
+      </Card>
 
-      <form
-        action={saveLineSettings}
-        className="space-y-4 rounded-xl border border-neutral-200 bg-white p-5 shadow-sm"
-      >
-        <p className="text-sm font-medium text-neutral-900">2. チャネル情報を入力</p>
-        <div>
-          <label className="block text-sm font-medium text-neutral-700">チャネルID</label>
-          <input
-            name="channelId"
-            defaultValue={salon.line_channel_id ?? ""}
-            className="mt-1 w-full rounded-md border border-neutral-300 px-3 py-2 text-sm focus:border-neutral-900 focus:outline-none"
-          />
-        </div>
-        <div>
-          <label className="block text-sm font-medium text-neutral-700">
-            チャネルシークレット
-          </label>
-          <input
-            name="channelSecret"
-            type="password"
-            defaultValue={salon.line_channel_secret ?? ""}
-            className="mt-1 w-full rounded-md border border-neutral-300 px-3 py-2 text-sm focus:border-neutral-900 focus:outline-none"
-          />
-        </div>
-        <div>
-          <label className="block text-sm font-medium text-neutral-700">
-            チャネルアクセストークン（長期）
-          </label>
-          <input
-            name="channelAccessToken"
-            type="password"
-            defaultValue={salon.line_channel_access_token ?? ""}
-            className="mt-1 w-full rounded-md border border-neutral-300 px-3 py-2 text-sm focus:border-neutral-900 focus:outline-none"
-          />
-        </div>
-        <button
-          type="submit"
-          className="rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white hover:bg-neutral-800"
-        >
-          保存する
-        </button>
-      </form>
+      <Card className="p-5">
+        <p className="mb-4 flex items-center gap-2 text-sm font-medium text-stone-900">
+          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-rose-100 text-xs text-rose-700">
+            2
+          </span>
+          チャネル情報を入力
+        </p>
+        <LineSettingsForm
+          channelId={salon.line_channel_id}
+          channelSecret={salon.line_channel_secret}
+          channelAccessToken={salon.line_channel_access_token}
+        />
+      </Card>
 
-      <div className="rounded-xl border border-neutral-200 bg-white p-5 text-sm shadow-sm text-neutral-500">
-        <p className="font-medium text-neutral-900">3. お客様とLINEアカウントを紐付ける</p>
-        <p className="mt-1">
+      <Card className="p-5 text-sm text-stone-500">
+        <p className="flex items-center gap-2 font-medium text-stone-900">
+          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-rose-100 text-xs text-rose-700">
+            3
+          </span>
+          お客様とLINEアカウントを紐付ける
+        </p>
+        <p className="mt-2">
           各顧客の詳細ページに表示される「連携コード」を、友だち追加後のトーク画面で送信して
           もらうと自動的に連携されます。
         </p>
-      </div>
+      </Card>
     </div>
   );
 }

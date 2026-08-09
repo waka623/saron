@@ -1,6 +1,9 @@
 import Link from "next/link";
 import { requireCurrentSalon } from "@/lib/auth/current-salon";
 import { createClient } from "@/lib/supabase/server";
+import { Card, CardHeader } from "@/components/ui/card";
+import { EmptyState } from "@/components/ui/empty-state";
+import { IconUsers, IconCheckCircle, IconAlertTriangle, IconCalendarOff } from "@/components/icons";
 
 const DORMANT_THRESHOLD_DAYS = 60;
 
@@ -41,69 +44,83 @@ export default async function DashboardPage() {
   ).length;
 
   const stats = [
-    { label: "登録顧客数", value: customerCount ?? 0 },
-    { label: "来店実績あり", value: lastVisitByCustomer.size },
-    { label: `${DORMANT_THRESHOLD_DAYS}日以上未来店`, value: dormantCount, highlight: dormantCount > 0 },
+    { label: "登録顧客数", value: customerCount ?? 0, icon: IconUsers },
+    { label: "来店実績あり", value: lastVisitByCustomer.size, icon: IconCheckCircle },
+    {
+      label: `${DORMANT_THRESHOLD_DAYS}日以上未来店`,
+      value: dormantCount,
+      icon: IconAlertTriangle,
+      highlight: dormantCount > 0,
+    },
   ];
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold text-neutral-900">ダッシュボード</h1>
-        <p className="mt-1 text-sm text-neutral-500">{salon.name} の状況</p>
+        <h1 className="text-2xl font-semibold tracking-tight text-stone-900">ダッシュボード</h1>
+        <p className="mt-1 text-sm text-stone-500">{salon.name} の状況</p>
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-        {stats.map((stat) => (
-          <div
-            key={stat.label}
-            className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm"
-          >
-            <p className="text-sm text-neutral-500">{stat.label}</p>
-            <p
-              className={`mt-2 text-3xl font-semibold ${
-                stat.highlight ? "text-amber-600" : "text-neutral-900"
-              }`}
-            >
-              {stat.value}
-              <span className="ml-1 text-base font-normal text-neutral-400">名</span>
-            </p>
-          </div>
-        ))}
+        {stats.map((stat) => {
+          const Icon = stat.icon;
+          return (
+            <Card key={stat.label} className="p-5">
+              <div className="flex items-center justify-between">
+                <p className="text-sm text-stone-500">{stat.label}</p>
+                <Icon
+                  className={`h-4.5 w-4.5 ${stat.highlight ? "text-amber-500" : "text-stone-300"}`}
+                />
+              </div>
+              <p
+                className={`mt-2 text-3xl font-semibold ${
+                  stat.highlight ? "text-amber-600" : "text-stone-900"
+                }`}
+              >
+                {stat.value}
+                <span className="ml-1 text-base font-normal text-stone-400">名</span>
+              </p>
+            </Card>
+          );
+        })}
       </div>
 
       {dormantCount > 0 && (
-        <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
-          {dormantCount}名のお客様が{DORMANT_THRESHOLD_DAYS}日以上来店していません。
-          <Link href="/campaigns" className="ml-1 font-medium underline">
-            リピート促進配信を設定する
-          </Link>
-        </div>
+        <Card className="flex items-start gap-3 border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+          <IconAlertTriangle className="h-5 w-5 shrink-0" />
+          <p>
+            {dormantCount}名のお客様が{DORMANT_THRESHOLD_DAYS}日以上来店していません。
+            <Link href="/campaigns" className="ml-1 font-medium underline underline-offset-2">
+              リピート促進配信を設定する
+            </Link>
+          </p>
+        </Card>
       )}
 
-      <div className="rounded-xl border border-neutral-200 bg-white shadow-sm">
-        <div className="border-b border-neutral-200 px-5 py-4">
-          <h2 className="text-sm font-semibold text-neutral-900">最近の来店記録</h2>
-        </div>
-        <ul className="divide-y divide-neutral-100">
-          {(recentVisits ?? []).length === 0 && (
-            <li className="px-5 py-6 text-sm text-neutral-400">
-              まだ来店記録がありません
-            </li>
-          )}
-          {(recentVisits ?? []).map((visit) => (
-            <li key={visit.id} className="flex items-center justify-between px-5 py-3">
-              <div>
-                <p className="text-sm font-medium text-neutral-900">
-                  {(visit.customers as unknown as { name: string } | null)?.name ?? "不明"}
-                </p>
-                <p className="text-xs text-neutral-500">{visit.menu ?? "メニュー未記入"}</p>
-              </div>
-              <p className="text-xs text-neutral-400">{visit.visit_date}</p>
-            </li>
-          ))}
-        </ul>
-      </div>
+      <Card>
+        <CardHeader title="最近の来店記録" />
+        {(recentVisits ?? []).length === 0 ? (
+          <EmptyState
+            icon={<IconCalendarOff className="h-9 w-9" />}
+            title="まだ来店記録がありません"
+            description="顧客ページから来店記録を追加すると、ここに表示されます"
+          />
+        ) : (
+          <ul className="divide-y divide-stone-100">
+            {(recentVisits ?? []).map((visit) => (
+              <li key={visit.id} className="flex items-center justify-between px-5 py-3">
+                <div>
+                  <p className="text-sm font-medium text-stone-900">
+                    {(visit.customers as unknown as { name: string } | null)?.name ?? "不明"}
+                  </p>
+                  <p className="text-xs text-stone-500">{visit.menu ?? "メニュー未記入"}</p>
+                </div>
+                <p className="text-xs text-stone-400">{visit.visit_date}</p>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
     </div>
   );
 }
