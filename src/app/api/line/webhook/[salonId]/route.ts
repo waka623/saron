@@ -58,11 +58,18 @@ export async function POST(
     await admin.from("customers").update({ line_user_id: userId }).eq("id", match.id);
 
     if (event.replyToken) {
-      await replyLineMessage(
-        accessToken,
-        event.replyToken,
-        `${match.name}様、LINE連携が完了しました。今後のお知らせをこちらにお送りします。`
-      );
+      // The linking itself already succeeded above; a failed confirmation
+      // reply (LINE API hiccup, rate limit, revoked token) shouldn't turn
+      // into a 500 that makes LINE retry-deliver the whole webhook.
+      try {
+        await replyLineMessage(
+          accessToken,
+          event.replyToken,
+          `${match.name}様、LINE連携が完了しました。今後のお知らせをこちらにお送りします。`
+        );
+      } catch (err) {
+        console.error("LINE reply failed after successful account link", err);
+      }
     }
   }
 
