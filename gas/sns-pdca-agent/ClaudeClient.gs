@@ -3,14 +3,14 @@
  * APIキーはスクリプトプロパティ CLAUDE_API_KEY から取得する(コードに直書きしない)
  */
 
-function callClaudeForInsights_(prompt) {
+function callClaudeMessages_(system, messages, maxTokens) {
   const apiKey = getClaudeApiKey_();
 
   const payload = {
     model: CONFIG.CLAUDE_MODEL,
-    max_tokens: CONFIG.CLAUDE_MAX_TOKENS,
-    system: prompt.system,
-    messages: [{ role: 'user', content: prompt.user }],
+    max_tokens: maxTokens || CONFIG.CLAUDE_MAX_TOKENS,
+    system: system,
+    messages: messages,
   };
 
   const options = {
@@ -38,4 +38,14 @@ function callClaudeForInsights_(prompt) {
     throw new Error('Claude APIのレスポンスにテキストが含まれていません。');
   }
   return textBlock.text;
+}
+
+/** 週次レポートの示唆生成(ClaudePrompt.gsのbuildInsightPrompt_と対) */
+function callClaudeForInsights_(prompt) {
+  return callClaudeMessages_(prompt.system, [{ role: 'user', content: prompt.user }], CONFIG.CLAUDE_MAX_TOKENS);
+}
+
+/** LINE会話用。historyには過去のuser/assistantターンを渡す */
+function callClaudeConversation_(system, messages) {
+  return callClaudeMessages_(system, messages, CONFIG.CONVERSATION_MAX_TOKENS);
 }

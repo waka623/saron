@@ -64,11 +64,47 @@ Retentionの指標として使っている。
 | `SheetReader.gs` | トラッカーシートの読み込み・正規化 |
 | `Aggregator.gs` | 週次集計・前週比KPI・AARRRファネル分析 |
 | `ClaudePrompt.gs` | Claudeへの示唆生成プロンプト組み立て（チューニング対象） |
-| `ClaudeClient.gs` | Claude API (`UrlFetchApp`) 呼び出し |
+| `ClaudeClient.gs` | Claude API (`UrlFetchApp`) 呼び出し（週次レポート用・会話用で共用） |
 | `ReportWriter.gs` | レポート素案の組み立て・Google Docs/Sheetsへの書き出し |
 | `Main.gs` | `runWeeklyReport()` 本体、手動検証用関数 |
 | `Triggers.gs` | 週次トリガーの設定/解除 |
+| `LineWebhook.gs` | LINE Webhookの受け口(`doPost`)、簡易トークン認証 |
+| `LineClient.gs` | LINEへの返信送信 |
+| `Conversation.gs` | 会話の意図判定・ルーティング(質問/壁打ち・再集計・入力補助) |
+| `ConversationState.gs` | ユーザーごとの会話状態(直近集計・履歴・入力確認待ち)をCacheServiceで管理 |
+| `TrackerInput.gs` | LINEメッセージからのトラッカー入力パース・確認・書き込み |
 | `appsscript.json` | GASマニフェスト（タイムゾーン・権限スコープ） |
+
+## LINEでエージェントと会話する
+
+週次バッチとは別に、LINE経由でオンデマンドにエージェントとやり取りできる。対応する用途は4つ。
+
+| 用途 | 使い方 | 内部処理 |
+|---|---|---|
+| レポート内容への質問 | 自由に質問を送るだけ(例:「なぜエンゲージメントが落ちたの?」) | 直近の集計結果(なければ自動で最新週を集計)をコンテキストにClaudeが応答 |
+| 任意タイミングでの再集計依頼 | 「集計して」「今週の数字見せて」など | `aggregateWeekly_` をその場で実行し、要約を返信 + 以降の質問のコンテキストとしてキャッシュ |
+| 示唆の壁打ち | 再集計や質問のあとに続けて「他の案は?」「もっと具体的に」など | 直近の会話履歴(最大6往復)を保持したままClaudeと対話継続 |
+| トラッカーへの入力補助 | 「入力 8/20 リーチ500 いいね20 ...」(列名は`Config.gs`の`COLUMNS`に準拠) | 数値をパースして内容を提示 → 「OK」で確定した時だけシートに追記(誤読み取り対策で必ず確認を挟む) |
+
+### セットアップ(LINE連携)
+
+1. [LINE Developers Console](https://developers.line.biz/) でMessaging APIチャネルを作成し、チャネルアクセストークン(長期)を発行
+2. スクリプトプロパティに追加
+   - `LINE_CHANNEL_ACCESS_TOKEN`: LINEのチャネルアクセストークン
+   - `LINE_WEBHOOK_TOKEN`: 任意のランダム文字列(Webhook認証用。後述)
+3. Apps Scriptエディタで「デプロイ」→「新しいデプロイ」→種類「ウェブアプリ」を選択
+   - 実行するユーザー: 自分
+   - アクセスできるユーザー: 全員
+   - デプロイしてURLを取得(例: `https://script.google.com/macros/s/xxxx/exec`)
+4. LINE Developersの「Messaging API設定」→ Webhook URLに `{取得したURL}?token={LINE_WEBHOOK_TOKENの値}` を設定し、Webhookの利用をオンにする
+5. LINEでエージェントの公式アカウントを友だち追加し、メッセージを送って動作確認
+
+### ⚠️ セキュリティ上の制約
+
+GASのWeb Appは `doPost(e)` の中でHTTPリクエストヘッダーを読み取れない仕様のため、LINE公式のやり方(`X-Line-Signature`ヘッダーのHMAC-SHA256署名検証)がそのままでは実装できない。本実装ではその代替として、**Webhook URLにクエリパラメータで秘密トークンを付与し、一致しないリクエストは無視する**という簡易認証を行っている(`LineWebhook.gs`の`isAuthorizedWebhookRequest_`)。
+
+- Webhook URL自体を秘密として扱うこと(公開リポジトリやチャットに貼らない)
+- より厳密な検証が必要な場合は、GASの手前にCloud Functions等の薄いプロキシを挟んでHMAC検証する構成への切り替えを検討(将来拡張)
 
 ## AARRRの割り当て（初期仮説）
 

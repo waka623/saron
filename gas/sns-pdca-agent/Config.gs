@@ -41,6 +41,12 @@ const CONFIG = {
   CLAUDE_MODEL: 'claude-sonnet-5',
   CLAUDE_MAX_TOKENS: 2000,
   CLAUDE_API_VERSION: '2023-06-01',
+
+  // --- LINE会話機能 ---
+  CONVERSATION_MAX_TOKENS: 1024,
+  CONVERSATION_HISTORY_TURNS: 6, // 保持する往復数(user+assistantでこの2倍をキャッシュ)
+  CONVERSATION_CACHE_TTL_SECONDS: 21600, // CacheServiceの上限(6時間)
+  PENDING_INPUT_CACHE_TTL_SECONDS: 600, // トラッカー入力確認の保持時間(10分)
 };
 
 function getScriptProperty_(key) {
@@ -57,4 +63,14 @@ function getTrackerSpreadsheetId_() {
 
 function getClaudeApiKey_() {
   return getScriptProperty_('CLAUDE_API_KEY');
+}
+
+function getLineChannelAccessToken_() {
+  return getScriptProperty_('LINE_CHANNEL_ACCESS_TOKEN');
+}
+
+// Webhook URLに付与する認証トークン(GASのWeb AppはHTTPヘッダーを読めないため、
+// LINE公式の署名検証の代わりにクエリパラメータで簡易認証する)。未設定ならnullを返す。
+function getLineWebhookToken_() {
+  return PropertiesService.getScriptProperties().getProperty('LINE_WEBHOOK_TOKEN');
 }
