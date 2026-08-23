@@ -5,6 +5,7 @@
  * 1. レポート内容への質問 / 3. 示唆の壁打ち → handleFreeformQuestion_ (Claudeとの自由対話)
  * 2. 任意タイミングでの再集計依頼            → handleReaggregateRequest_
  * 4. トラッカーへの入力補助                  → TrackerInput.gs
+ * 5. ICP仮説の抽出(顧客データ分析)          → IcpAnalysis.gs
  */
 
 function routeConversation_(userId, text) {
@@ -19,6 +20,10 @@ function routeConversation_(userId, text) {
 
   if (isTrackerInputCommand_(text)) {
     return handleTrackerInputRequest_(userId, text);
+  }
+
+  if (isIcpAnalysisCommand_(text)) {
+    return handleIcpAnalysisRequest_(userId, text);
   }
 
   if (isReaggregateCommand_(text)) {
