@@ -2,12 +2,20 @@
  * エントリポイント
  *
  * runWeeklyReport() が週次トリガーから呼ばれるメイン処理。
- * ここで行うのは「集計 → 示唆生成 → レポート素案の書き出し」まで。
+ * ここで行うのは「集計 → 示唆生成 → レポート素案の書き出し → 完了/失敗をLINEで通知」まで。
  * 送信・クライアント対応・示唆の採用判断は行わない(人の仕事)。
  */
 
 function runWeeklyReport() {
-  const rows = readTrackerRows_();
+  let rows;
+  try {
+    rows = readTrackerRows_();
+  } catch (err) {
+    Logger.log(`[ERROR] トラッカー読み込みに失敗しました: ${err}`);
+    notifyOwnerOfWeeklyRunFailure_(String(err));
+    return [{ account: '', status: 'error', error: String(err) }];
+  }
+
   const accounts = resolveTargetAccounts_(rows);
   const now = new Date();
 
@@ -24,12 +32,18 @@ function runWeeklyReport() {
           : writeReportToDocs_(aggregation, insightMarkdown);
 
       Logger.log(`[OK] ${label}: ${outputUrl}`);
-      return { account: label, status: 'ok', outputUrl };
+      return { account: label, status: 'ok', outputUrl, aggregation };
     } catch (err) {
       Logger.log(`[ERROR] ${label}: ${err}`);
       return { account: label, status: 'error', error: String(err) };
     }
   });
+
+  try {
+    notifyOwnerOfWeeklyRunResult_(results);
+  } catch (err) {
+    Logger.log(`週次結果のLINE通知送信でエラーが発生しました(レポート自体は生成済み): ${err}`);
+  }
 
   return results;
 }

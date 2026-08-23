@@ -74,3 +74,9 @@ function getLineChannelAccessToken_() {
 function getLineWebhookToken_() {
   return PropertiesService.getScriptProperties().getProperty('LINE_WEBHOOK_TOKEN');
 }
+
+// 週次レポートの完了/失敗をpush通知する送り先(依頼者自身のLINEユーザーID)。
+// 任意機能のため、未設定でもエラーにはせずnullを返す(呼び出し側で通知をスキップする)。
+function getOwnerLineUserId_() {
+  return PropertiesService.getScriptProperties().getProperty('OWNER_LINE_USER_ID');
+}
