@@ -53,3 +53,17 @@ function getPendingTrackerInput_(userId) {
 function clearPendingTrackerInput_(userId) {
   CacheService.getScriptCache().remove(`pending_${userId}`);
 }
+
+// 学習ループ用: 直近の生成結果(フィードバック待ち)を保持する
+function setLastDraft_(userId, draft) {
+  CacheService.getScriptCache().put(`draft_${userId}`, JSON.stringify(draft), CONFIG.CONVERSATION_CACHE_TTL_SECONDS);
+}
+
+function getLastDraft_(userId) {
+  const raw = CacheService.getScriptCache().get(`draft_${userId}`);
+  return raw ? JSON.parse(raw) : null;
+}
+
+function clearLastDraft_(userId) {
+  CacheService.getScriptCache().remove(`draft_${userId}`);
+}

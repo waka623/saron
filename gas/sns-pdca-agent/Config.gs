@@ -47,6 +47,10 @@ const CONFIG = {
   CONVERSATION_HISTORY_TURNS: 6, // 保持する往復数(user+assistantでこの2倍をキャッシュ)
   CONVERSATION_CACHE_TTL_SECONDS: 21600, // CacheServiceの上限(6時間)
   PENDING_INPUT_CACHE_TTL_SECONDS: 600, // トラッカー入力確認の保持時間(10分)
+
+  // --- 学習ループ(フィードバック蓄積) ---
+  KNOWLEDGE_LOG_SHEET_NAME: 'ナレッジログ',
+  KNOWLEDGE_EXAMPLES_LIMIT: 3, // プロンプトに参考例として注入する件数
 };
 
 function getScriptProperty_(key) {

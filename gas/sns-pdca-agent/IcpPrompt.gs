@@ -4,7 +4,7 @@
  * 他のプロンプトと同様、調整しやすいようここだけ切り出してある。
  */
 
-function buildIcpPrompt_(rawCustomerData, aggregation) {
+function buildIcpPrompt_(rawCustomerData, aggregation, pastExamples) {
   const system = [
     'あなたはSNS発信者支援のグロースマーケターの分析パートナーです。',
     '与えられた顧客データから、ICP(Ideal Customer Profile)の仮説を抽出してください。',
@@ -26,6 +26,12 @@ function buildIcpPrompt_(rawCustomerData, aggregation) {
   const userLines = ['## 顧客データ', rawCustomerData];
   if (aggregation) {
     userLines.push('', '## 参考: 直近のSNS運用データ', formatKpiForPrompt_(aggregation.kpi), formatFunnelForPrompt_(aggregation.funnel));
+  }
+  if (pastExamples && pastExamples.length > 0) {
+    userLines.push('', '## 過去に依頼者から評価された例(トーン・粒度の参考に)');
+    pastExamples.forEach((ex, i) => {
+      userLines.push(`例${i + 1}(${ex.feedback}):`, `入力: ${ex.input}`, `出力: ${ex.output}`, '');
+    });
   }
   userLines.push('', '上記からICP仮説を抽出してください。');
 

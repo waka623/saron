@@ -6,6 +6,7 @@
  * 2. 任意タイミングでの再集計依頼            → handleReaggregateRequest_
  * 4. トラッカーへの入力補助                  → TrackerInput.gs
  * 5. ICP仮説の抽出(顧客データ分析)          → IcpAnalysis.gs
+ * 6. ドラフトへのフィードバック(学習ループ)  → Learning.gs
  */
 
 function routeConversation_(userId, text) {
@@ -16,6 +17,14 @@ function routeConversation_(userId, text) {
 
   if (isCancelCommand_(text)) {
     return 'いま取り消せる内容はありません。';
+  }
+
+  if (isFeedbackCommand_(text)) {
+    return handleFeedbackCommand_(userId, text);
+  }
+
+  if (isLearningStatusCommand_(text)) {
+    return handleLearningStatusRequest_();
   }
 
   if (isTrackerInputCommand_(text)) {

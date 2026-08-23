@@ -23,8 +23,11 @@ function handleIcpAnalysisRequest_(userId, text) {
   }
 
   const aggregation = getLastAggregation_(userId);
-  const prompt = buildIcpPrompt_(rawData, aggregation);
+  const pastExamples = getRecentSuccessfulExamples_('ICP設計', CONFIG.KNOWLEDGE_EXAMPLES_LIMIT);
+  const prompt = buildIcpPrompt_(rawData, aggregation, pastExamples);
   const personaText = callClaudeConversation_(prompt.system, [{ role: 'user', content: prompt.user }]);
+
+  setLastDraft_(userId, { domain: 'ICP設計', input: rawData, output: personaText });
 
   let docUrl = null;
   try {
@@ -38,6 +41,7 @@ function handleIcpAnalysisRequest_(userId, text) {
     lines.push('', `ペルソナシートを保存しました: ${docUrl}`);
   }
   lines.push('', 'これは仮説のドラフトです。実際にこのICPで進めるかはご判断ください。');
+  lines.push('採用なら「採用」、違う場合は「却下」、直した最終版があれば「修正: (最終版)」と送ると、次回以降の生成に反映します。');
   return lines.join('\n');
 }
 
