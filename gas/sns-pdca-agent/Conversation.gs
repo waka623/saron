@@ -7,6 +7,7 @@
  * 4. トラッカーへの入力補助                  → TrackerInput.gs
  * 5. ICP仮説の抽出(顧客データ分析)          → IcpAnalysis.gs
  * 6. ドラフトへのフィードバック(学習ループ)  → Learning.gs
+ * 7. コピーライティング初稿生成              → Copywriting.gs
  */
 
 function routeConversation_(userId, text) {
@@ -33,6 +34,10 @@ function routeConversation_(userId, text) {
 
   if (isIcpAnalysisCommand_(text)) {
     return handleIcpAnalysisRequest_(userId, text);
+  }
+
+  if (isCopywritingCommand_(text)) {
+    return handleCopywritingRequest_(userId, text);
   }
 
   if (isReaggregateCommand_(text)) {
