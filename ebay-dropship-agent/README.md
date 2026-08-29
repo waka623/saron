@@ -12,11 +12,14 @@ eBay 上で **卸直送型の無在庫ドロップシッピング** を、承認
 3. `compliance.md` — eBay の無在庫・ドロップシッピング規約とレート制限
 4. `DECISIONS.md` — これまでの設計判断の記録
 
-## 現在のステータス: Phase 0(プロジェクト初期化)完了
+## 現在のステータス: Phase 1(eBayアダプタ+認証)完了
 
-- ディレクトリ雛形・依存定義(`pyproject.toml`)・`.env.example` を作成。
-- 各モジュールは空のインターフェース(ABC / pydantic モデル)のみ。ロジックは `NotImplementedError`。
-- `guardrails/` はコンプライアンス制約の TODO と、スキップ付きテストスケルトンのみ(`tests/test_guardrails.py`)。
+- Phase 0:ディレクトリ雛形・依存定義(`pyproject.toml`)・`.env.example` を作成。利益ガードの数値(目標利益率20%/最低純利益$5)と
+  除外カテゴリ(6項目)は `.env` に定数として確定済み(`DECISIONS.md` 参照)。
+- Phase 1:`adapters/ebay/` に OAuth(自動リフレッシュ付き)・レート制限クライアント(コールバジェット+指数バックオフ)・
+  読み取り系疎通確認(`get_rate_limits`)を実装。実 Sandbox キー未投入のためテストは `httpx.MockTransport` でモック。
+  `EbayClient.from_settings()` が `.env` から認証情報を読むため、実キーを書き込むだけでコード変更なしに実疎通へ切り替わる。
+- `guardrails/` はまだコンプライアンス制約の TODO と、スキップ付きテストスケルトンのみ(`tests/test_guardrails.py`、Phase 2で実装)。
 
 ## セットアップ
 

@@ -17,7 +17,10 @@ class Settings(BaseSettings):
 
     target_margin_pct: float = 20.0
     min_net_profit: float = 5.0
-    excluded_categories: str = "hazmat,counterfeit_risk_brands"
+    excluded_categories: str = (
+        "luxury_brand_goods,authentication_required,hazmat,"
+        "food_supplements_pharma,adult,gift_cards"
+    )
 
     approval_ui_mode: str = "both"  # cli | web | both
     approval_high_risk_discount_pct: float = 15.0
