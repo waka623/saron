@@ -13,6 +13,65 @@ eBay 上で **卸直送型の無在庫ドロップシッピング** を、承認
 4. `DECISIONS.md` — これまでの設計判断の記録
 5. `GO_LIVE.md` — 本番投入前に必ず終わらせるチェックリスト(各フェーズのTODOを集約)
 
+## Quickstart(デモ)
+
+**実eBayキー不要・実発注OFFのまま、完成品を自分の手元で動かして確認できる。** 以下をこの順に
+コピペで実行すればよい(初回だけ`.env`作成が必要。2回目以降は`cp .env.example .env`以降を省略可)。
+
+```bash
+cd ebay-dropship-agent
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+cp .env.example .env                 # 中身は既定値のままでよい(実キー欄は空のまま)
+
+# 1) DBマイグレーション(sqlite。DATABASE_URLの既定値に対して実行)
+alembic upgrade head
+
+# 2) デモ用シードデータ投入(サプライヤーCSVを1行書くだけ。何度実行してもよい)
+ebay-dropship demo seed
+
+# 3) 「今すぐ実行」: Plan→Check→Actを1回まわし、proposalsが生成される様子を見る
+ebay-dropship cycle run-once --demo
+
+# 4) 承認CLIで一覧・承認・却下してみる(<id>は3)の出力からコピー)
+ebay-dropship proposals list
+ebay-dropship proposals approve <id> --by demo-user
+ebay-dropship proposals reject <id> --by demo-user --reason "デモのため却下"
+
+# 5) 最小Web UI(FastAPI)を起動して、ブラウザ/curlからも触ってみる
+export APPROVAL_API_USERS="demo:demo-pass"   # username:password(カンマ区切りで複数可)
+ebay-dropship api serve --port 8000
+```
+
+Web UI が起動している別ターミナルから(または起動前に`.env`へ`APPROVAL_API_USERS`を書いてもよい):
+
+```bash
+curl http://127.0.0.1:8000/healthz                              # 認証不要
+curl -u demo:demo-pass http://127.0.0.1:8000/proposals           # 一覧(要Basic認証)
+curl -u demo:demo-pass -X POST http://127.0.0.1:8000/proposals/<id>/approve \
+     -H "Content-Type: application/json" -d '{}'
+```
+ブラウザから触る場合は `http://127.0.0.1:8000/proposals` にアクセスし、Basic認証ダイアログで
+`demo` / `demo-pass`(上で設定した`APPROVAL_API_USERS`の値)を入力する。
+
+**手順3)で何が起きているか:** `demo.py` の固定フィクスチャ(架空SKU「DEMO-SKU-1」・架空listing
+「DEMO-LISTING-1」)を使い、`research.evaluate_candidate`→`listing.generate_draft`(Plan)と
+`pricing.evaluate_next_action`(Check→Act)という既存のルールベース判断ロジックを実際に呼び出す。
+LLMは一切使わない。結果として `hold`(出品候補として次段へ)・`publish`(出品ドラフト)・
+`price_change`(値下げ提案)の3件がそのまま承認キューに積まれるのを確認できる。
+
+**デモ中に外部へ副作用が絶対に出ない理由(3重):**
+1. `cycle run-once --demo`は`orchestrator/cycle.py::run_cycle`しか呼ばない。これは提案を
+   承認キュー(DB)に積むだけの関数で、eBay/サプライヤーへの書き込みAPIを一切import/呼び出ししない
+   (`tests/test_orchestrator_cycle.py::test_cycle_module_never_references_do_phase_execution`で
+   静的に保証)。
+2. publish/price_change/purchaseの実行(`orchestrator/do.py`の`execute_*`関数)はCLI/Web UIの
+   どちらからも呼び出す経路が今は存在しない(承認/却下のみ)。手順4)5)で承認しても、それだけでは
+   何もeBayへ送信されない。
+3. 仮に将来Doフェーズを呼ぶコードを書いたとしても、`.env`のeBay認証情報(`EBAY_CLIENT_ID`等)は
+   空のままなのでOAuthトークン取得自体が失敗する。さらに自動発注は
+   `ENABLE_AUTOMATED_SUPPLIER_PURCHASE=false`(既定・go-live判断まで変更しない)でも二重にブロックされる。
+
 ## 現在のステータス: Phase 7(ダッシュボード+運用)完了・開発フェーズ最終回
 
 - `api/`: 承認Web UI(FastAPI)。CLIと同じ `SqlProposalRepository` を共有(承認ロジックの再実装なし)。

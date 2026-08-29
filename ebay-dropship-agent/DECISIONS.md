@@ -566,3 +566,34 @@ F3は別途修正・クローズ済み)。境界値・並行実行系のテス�
 
 withdraw実行機能自体の実装(F7で可視化のみ行い、機能追加はしていない)も、新しいeBay API連携が
 必要になるため実質的に実Sandbox統合待ちの一部として扱う。
+
+## Quickstart(デモ)の追加(2026-08-29)
+
+ユーザーが実キー無し・実発注OFFのまま完成品を自分で触って確認できるよう、READMEに
+「Quickstart(デモ)」節と、それを動かすための最小限のコード(`demo.py`)を追加した。
+
+- **`src/ebay_dropship/demo.py`(新規)**: 判断ロジックは一切持たず、research/listing/pricingの
+  既存ルールベースロジックへ固定フィクスチャ(架空SKU「DEMO-SKU-1」・架空listing
+  「DEMO-LISTING-1」)を渡す`plan_tasks`/`act_tasks`を組み立てるだけ。`orchestrator/cycle.py::run_cycle`
+  にそのまま渡せる形にしてあり、`run_cycle`自体は無変更(publish/price_change/purchaseの実行を
+  一切呼ばないという既存の静的保証もそのまま有効)。
+  - `seed_demo_supplier_csv`: `CsvSupplierAdapter`が読める形式でCSVを書く。`as_of`は実行時刻を
+    使うため、いつ実行しても鮮度チェックに引っかからない(固定の過去日時をコミットしない)。
+- **`cli/__init__.py`**: 既存動作は無変更のまま、2点だけ追加した。
+  - `ebay-dropship cycle run-once`に`--demo`フラグを追加(既定Falseで従来通り空タスク実行のまま。
+    `test_cycle_run_once_reports_zero_when_no_tasks_wired`は無変更でgreen)。付けるとdemo.pyの
+    タスクでPlan→Actを実行する。
+  - `ebay-dropship demo seed`コマンドを新設(`demo`という新しいclickグループ)。
+- 生成される3件の提案(`hold`/`publish`/`price_change`)の数値はすべて実際にresearch/listing/
+  pricingのコードを呼んで検算済み(README本文にも同じ数値を記載)。
+
+**変更しなかったもの(意図的)**: `orchestrator/do.py`の実行関数(`execute_publish`等)をCLI/APIから
+呼び出す経路は追加していない。今回のデモ要求(Plan/Check/Actの可視化・承認CLI/Web UIの操作)には
+不要であり、追加すると実Sandbox統合前に新しい実行経路を増やすことになるため。現状、承認後の
+実行はCLI/API双方から呼び出す手段がそもそも存在しない(`GO_LIVE.md`の(a)以降を参照)。
+
+**検証**: 新規5テスト(`tests/test_demo.py`)+3テスト(`tests/test_cli_demo.py`)を追加。
+既存の`tests/test_cli.py`・`tests/test_orchestrator_cycle.py`は無変更のままgreen。
+さらに、フレッシュな`.venv`+`.env.example`のコピーからREADME記載のコマンド列を実際に
+1行ずつ最後まで(alembic→seed→run-once --demo→proposals list/approve/reject→api serve→curl)
+実行し、記載通りに動くことを確認した。全体テスト: `204 passed`。`ruff check`もクリーン。

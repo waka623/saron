@@ -4,8 +4,11 @@
     ebay-dropship proposals list
     ebay-dropship proposals approve <id> --by <name>
     ebay-dropship proposals reject <id> --by <name> --reason "..."
-    ebay-dropship cycle run-once
+    ebay-dropship cycle run-once [--demo]
+    ebay-dropship demo seed
     ebay-dropship api serve
+
+`--demo`/`demo seed` は実キー・実発注を一切使わないデモ専用の経路(README「Quickstart(デモ)」参照)。
 """
 
 from __future__ import annotations
@@ -93,25 +96,65 @@ def cycle() -> None:
 
 
 @cycle.command("run-once")
-def run_cycle_once() -> None:
+@click.option(
+    "--demo",
+    is_flag=True,
+    default=False,
+    help="demo.pyのフィクスチャ(架空SKU/listing)でPlan/Actを実行する。実キー・実発注は使わない。",
+)
+def run_cycle_once(demo: bool) -> None:
     """Plan→Check→Actを1回実行し、提案を承認キューに積む(手動「今すぐ1回実行」)。
 
     重要: publish/price_change/purchase の実行は行わない。積まれた提案は
     `ebay-dropship proposals approve` で人間が承認した後、別途Doフェーズが実行する。
 
     現時点ではPlan/Actの対象(どのSKU/listingを評価するか)の自動列挙は未統合(将来の統合ポイント。
-    DECISIONS.md参照)。このコマンドは空のタスクリストでサイクル機構自体の動作を確認できる。
+    DECISIONS.md参照)。`--demo` を付けない既定動作は空のタスクリストのままで、サイクル機構自体の
+    動作確認のみ行う(従来通り)。`--demo` を付けると `demo.py` の架空SKU/listingフィクスチャで
+    実際にproposalsが生成される様子を確認できる(README「Quickstart(デモ)」参照。事前に
+    `ebay-dropship demo seed` でサプライヤーCSVを用意しておくこと)。
     """
     with _session() as session:
         repo = SqlProposalRepository(session)
-        result = run_cycle(repository=repo, plan_tasks=[], act_tasks=[], notifier=LoggingNotifier())
+        if demo:
+            from ebay_dropship.demo import (
+                build_demo_act_tasks,
+                build_demo_plan_tasks,
+                build_demo_supplier,
+            )
+
+            supplier = build_demo_supplier(settings)
+            plan_tasks = build_demo_plan_tasks(settings)
+            act_tasks = build_demo_act_tasks(settings, supplier)
+        else:
+            plan_tasks, act_tasks = [], []
+        result = run_cycle(repository=repo, plan_tasks=plan_tasks, act_tasks=act_tasks, notifier=LoggingNotifier())
     click.echo(
         f"plan: enqueued={len(result.plan_enqueued)} skipped={len(result.plan_skipped)} | "
         f"act: enqueued={len(result.act_enqueued)} skipped={len(result.act_skipped)} | "
         f"errors={len(result.errors)}"
     )
+    for proposal in [*result.plan_enqueued, *result.act_enqueued]:
+        click.echo(
+            f"  [{proposal.id}] {proposal.proposal_type.value} priority={proposal.priority.value} "
+            f"profit={proposal.estimated_profit} — {proposal.summary}"
+        )
     for exc in result.errors:
         click.echo(f"  error: {exc}", err=True)
+
+
+@cli.group()
+def demo() -> None:
+    """実キー・実発注を使わない安全なデモ用コマンド(README「Quickstart(デモ)」参照)。"""
+
+
+@demo.command("seed")
+def demo_seed() -> None:
+    """デモ用サプライヤーCSVを`settings.supplier_csv_path`に書く(冪等、何度でも再実行可)。"""
+    from ebay_dropship.demo import seed_demo_supplier_csv
+
+    path = seed_demo_supplier_csv(settings.supplier_csv_path)
+    click.echo(f"seeded demo supplier CSV: {path}")
 
 
 @cli.group()
