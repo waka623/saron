@@ -59,6 +59,17 @@ WHOLESALE_KEYWORDS: tuple[str, ...] = (
     "ドロップシップ",
 )
 
+# F1: 卸キーワードが1語入っているだけで通ってしまう(キーワード充足のみの判定)ことへの対策。
+# 仕入れ経路を曖昧にする("結局どこから仕入れるか特定できない")言い回しが含まれる場合は、
+# 卸キーワードの有無に関わらず deny by default にする(「疑わしきは deny」)。
+AMBIGUOUS_SOURCING_MARKERS: tuple[str, ...] = (
+    "通常ルート",
+    "別ルート",
+    "他のルート",
+    "緊急時は",
+    "臨時で",
+)
+
 
 def check_not_retail_arbitrage(source_description: str) -> GuardrailResult:
     """仕入れが卸直送(サプライヤー)であることを確認する。小売アービトラージ疑い・確認不能はいずれも deny。"""
@@ -69,6 +80,13 @@ def check_not_retail_arbitrage(source_description: str) -> GuardrailResult:
             return GuardrailResult.deny(
                 f"小売アービトラージの疑いのある表現('{keyword}')を検出。"
                 "卸直送のサプライヤーに切り替える必要があります(compliance.md 第1章)。"
+            )
+
+    for marker in AMBIGUOUS_SOURCING_MARKERS:
+        if marker.lower() in text:
+            return GuardrailResult.deny(
+                f"仕入れ経路を曖昧にする表現('{marker}')を検出。卸キーワードの有無に関わらず"
+                "deny by default(仕入れ元を具体的に特定できない記述は通さない)。"
             )
 
     if not any(keyword.lower() in text for keyword in WHOLESALE_KEYWORDS):

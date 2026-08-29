@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import ast
 import pathlib
 from decimal import Decimal
 
@@ -126,6 +127,51 @@ def test_blocks_when_requires_human_approval_flag_is_inconsistent():
     assert calls == []
 
 
+#: このリポジトリで唯一 eBay 書き込みメソッドの呼び出しが許されている接続点(src/ からの相対パス)。
+#: F2(adversarial security review, 2026-08-29): 以前はファイル名(basename)だけで判定しており、
+#: `src/どこか/do.py` のような無関係な同名ファイルが誤って除外される穴があった。フルパスで判定する。
+ALLOWED_WRITE_CALL_RELPATHS = {
+    "ebay_dropship/adapters/ebay/client.py",
+    "ebay_dropship/guardrails/gateway.py",
+    "ebay_dropship/orchestrator/do.py",
+}
+
+
+def _scan_for_bypassing_write_calls(
+    src_root: pathlib.Path, write_methods: tuple[str, ...], allowed_relpaths: set[str]
+) -> list[str]:
+    """`allowed_relpaths` 以外の *.py で `write_methods` のいずれかへの属性アクセスを検出する。
+
+    F2: 以前は `f".{method}("` という素朴な部分文字列一致だったため、
+    `bound = client.create_offer; bound(...)` のようなエイリアス代入や
+    `getattr(client, 'publish_offer')(...)` のようなreflectionをすり抜けた。
+    ASTベースで (a) 属性アクセスそのもの(呼び出しの形を問わない)と (b) `getattr(obj, '<method>')`
+    の第2引数の文字列リテラルの両方を検出する(deny by defaultの精神: 誤検知の可能性より見逃しを避ける)。
+    """
+    offending: list[str] = []
+    for path in src_root.rglob("*.py"):
+        relpath = path.relative_to(src_root).as_posix()
+        if relpath in allowed_relpaths:
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr in write_methods:
+                offending.append(f"{relpath}::{node.attr}(属性アクセス、行{node.lineno})")
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "getattr"
+                and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value in write_methods
+            ):
+                offending.append(f"{relpath}::{node.args[1].value}(getattr経由、行{node.lineno})")
+    return offending
+
+
 def test_ebay_write_methods_are_only_called_through_guardrail_gateway():
     """静的検査: EbayClient の書き込みメソッド呼び出しは、定義箇所と gateway 自身を除いてコードベースに存在しないこと。
 
@@ -134,16 +180,7 @@ def test_ebay_write_methods_are_only_called_through_guardrail_gateway():
     """
     write_methods = ("create_or_update_inventory_item", "create_offer", "publish_offer", "update_offer")
     src_root = pathlib.Path(__file__).resolve().parents[1] / "src"
-    # do.py は guardrails.gateway.execute_side_effect の executor として書き込みを行う、唯一許可された接続点。
-    allowed_files = {"client.py", "gateway.py", "do.py"}
 
-    offending: list[str] = []
-    for path in src_root.rglob("*.py"):
-        if path.name in allowed_files:
-            continue
-        text = path.read_text(encoding="utf-8")
-        for method in write_methods:
-            if f".{method}(" in text:
-                offending.append(f"{path.relative_to(src_root)}::{method}")
+    offending = _scan_for_bypassing_write_calls(src_root, write_methods, ALLOWED_WRITE_CALL_RELPATHS)
 
     assert offending == [], f"guardrails.gateway を経由しない eBay 書き込み呼び出しを検出: {offending}"

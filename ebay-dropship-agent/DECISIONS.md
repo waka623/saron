@@ -388,20 +388,102 @@ F3(HIGH)の修正のみに限定**し、F1/F2/F4〜F7は次タスクへの残課
   並行実行のたびに「実発注はちょうど1回・敗者側は`AlreadyClaimedError`というクリーンな拒否
   (クラッシュや無関係な例外ではない)」であることを両テストで確認した。
 
-### 次タスクへの残課題(今回は意図的に未着手。ユーザー指示によりスコープ外)
+## MEDIUM(F1/F2/F4)の修正(2026-08-29、F3クローズ後の続き)
+
+ユーザー指示で、adversarial security reviewのMEDIUM findings(F1/F2/F4)を修正した。各件について
+(1)まず失敗する回帰テストを書き(red)、(2)最小修正、(3)green化、の順を守り、F1/F2/F4以外の
+コードは変更していない。修正前に各件を GO_LIVE.md (d)(能力ごとの段階有効化)のブロッカーか
+非ブロッカーかに分類した(深刻度と本番投入前必須かは別軸として判断)。LOW(F5/F6/F7)と
+テスト欠落は今回も未着手(残課題のまま)。
+
+### F1: `check_not_retail_arbitrage`のキーワード充足による実質すり抜け
+
+- **GO_LIVE(d)判定: 非ブロッカー。** 理由: (1) publish/price_change/purchaseの実行は
+  この判定結果だけでなく、常に人間の承認(`requires_human_approval`)を主たる防波堤として
+  経由しており、このcomplianceチェックは自動化された副次的な防御(defense-in-depth)にすぎない。
+  (2) `rationale`は現状、研究/出品/価格ロジック(ルールベース、LLM不使用)がテンプレートから
+  機械的に生成しており、悪意ある人間が自由記述するフィールドではない。したがって今回のGO_LIVE(d)
+  判断(出品/価格改定/自動発注/API公開の各自動実行フラグを立てるか)には影響しない。
+  ただし卸直送限定はプロジェクトの最優先ルールであるため、修正自体は今回のタスクとして実施した。
+- **回帰テスト**: `tests/test_guardrails_compliance_gaming.py`
+  - `test_ambiguous_sourcing_hedge_with_incidental_wholesale_keyword_denies`
+    (「サプライヤー在庫が薄いため、緊急時は通常ルートで確保します。詳細は別途。」がdenyされることを検証。
+    修正前は`passed=True`でred確認済み)
+  - `test_still_allows_unambiguous_wholesale_direct_ship_wording`(既存の正常系が壊れないことの確認)
+- **修正**: `src/ebay_dropship/guardrails/__init__.py`
+  - `AMBIGUOUS_SOURCING_MARKERS`("通常ルート"/"別ルート"/"他のルート"/"緊急時は"/"臨時で")を追加し、
+    `check_not_retail_arbitrage`で卸キーワードの有無に関わらず、これらの表現が含まれる場合はdeny
+    するチェックを、小売キーワードチェックと卸キーワードチェックの間に追加した。
+  - 既存の`test_guardrails.py`(3件)・`test_guardrail_gateway.py`(全件)は無変更のまま green。
+
+### F2: バイパス検知の静的テスト自体の2つの盲点
+
+- **GO_LIVE(d)判定: 非ブロッカー。** 理由: この問題はテスト/CIの検知力(将来コードがバイパス経路を
+  作ってしまったときに気付けるか)の話であり、現在のコードのランタイム挙動を一切変えない。
+  レビュー時点で実際のバイパスが無いことは直接grepで別途確認済みであり、GO_LIVE(d)の各フラグを
+  立てても、この修正の有無で本番の振る舞いは変わらない。
+- **回帰テスト**: `tests/test_guardrail_gateway_static_check_robustness.py`
+  - `test_legacy_scan_misses_basename_collision_bypass` /
+    `test_legacy_scan_misses_alias_and_getattr_bypass`
+    (修正前アルゴリズムのコピーに対して合成ツリーで反例を再現。当初は`offending != []`をassertして
+    redを確認し、修正後はこの2件を「修正前の実際の挙動を恒久的に記録する」形に反転して残した
+    ―― `offending == []`をassertし、"盲点が実在した証拠"として green のまま保持)
+  - `test_fixed_scan_detects_basename_collision_bypass` /
+    `test_fixed_scan_detects_alias_and_getattr_bypass` /
+    `test_fixed_scan_still_ignores_the_real_allowed_files`(修正後の実物関数が同じ合成ツリーで
+    正しく検出し、かつ本来の許可ファイルは引き続き除外することを検証)
+- **修正**: `tests/test_guardrail_gateway.py`
+  - 走査ロジックを`_scan_for_bypassing_write_calls(src_root, write_methods, allowed_relpaths)`
+    として関数化。(a) 許可判定をbasenameからフルパス(`src/`相対、`ALLOWED_WRITE_CALL_RELPATHS`)に
+    変更、(b) 素朴な部分文字列一致をASTベースの検出(`ast.Attribute`属性アクセス全般+
+    `getattr(obj, '<method>')`の文字列リテラル引数)に置き換えた。
+  - `test_ebay_write_methods_are_only_called_through_guardrail_gateway`は同じ関数を呼ぶよう更新。
+    実コードに対する結果(バイパス無し)は修正前後で変わらず green。
+  - `src/`側のコード変更は無し(F2はテスト/CI側だけの問題だったため)。
+
+### F4: publish/price_changeの並行実行による重複実行(F3と同型)
+
+- **GO_LIVE(d)判定: ブロッカー。** 理由: F3(purchase)がHIGHとして修正済みなのに対し、
+  publish/price_changeの自動実行を本番で有効化する判断はGO_LIVE(d)がまさに問うている内容そのもの
+  ("出品公開(publish)を本番で自動実行してよいか"/"価格改定(price_change)を本番で自動実行してよいか")。
+  同じ構造的欠陥(状態遷移がget-then-set、実行時のAPPROVEDチェックが呼び出し元スナップショット依存)
+  を残したまま自動実行を有効化すると、cronとAPIトリガーの重なり等の通常運用でも実際に
+  outbound API呼び出し(publish_offer/update_offer)が二重発行されうる(実際に2スレッドで再現し、
+  修正前は両方とも成功していたことを確認)。したがって修正必須と判断し、今回のタスクとして実施した。
+- **回帰テスト**: `tests/test_orchestrator_do_concurrency.py`
+  - `test_concurrent_execute_publish_from_two_threads_only_one_actually_publishes`
+  - `test_concurrent_execute_price_change_from_two_threads_only_one_actually_applies`
+    (いずれも2スレッド・独立DBセッション。修正前は両方とも`publish_offer`/`update_offer`まで到達して
+    成功し、状態機械の`InvalidTransitionError`は2回目の`mark_executed`でしか衝突を検知しなかった
+    ―― F3と全く同じパターンをここでも実証し、redを確認済み)
+- **修正**: `src/ebay_dropship/orchestrator/do.py`
+  - `execute_publish`: item/offer作成(PUT/duplicate検知で既にidempotentな2ステップ、未変更)の後、
+    最後の`publish_offer`呼び出し+`ebay_listing_id`のpayload更新+executedへの確定を
+    `repository.claimed_execution`(F3で追加済みのSAVEPOINTベースの原子的claim)で直列化した。
+    `AlreadyClaimedError`は再送出のみ、`EbayApiError`は従来通り`mark_failed`で理由を記録してから
+    再送出する(例外の型・メッセージは変更していないため、既存の4失敗モードテストは無変更で green)。
+  - `execute_price_change`: 同様に`update_offer`呼び出し+payload更新+executedへの確定を
+    `claimed_execution`で直列化した。
+  - `store/repository.py`・`guardrails/gateway.py`は無変更(F3で追加済みの`claimed_execution`を
+    再利用しただけ)。item/offer作成ステップ自体は意図的に未保護のまま残した(PUTの冪等性・
+    `EbayOfferAlreadyExistsError`捕捉による重複吸収で既に安全なため、保護対象を実際にリスクのある
+    最後の1手に絞ることで、中断後の再開(resumability、`update_payload`による段階的な進捗記録)を
+    壊さないようにした)。
+
+### 検証結果(F1/F2/F4共通)
+
+- 全体テスト: `179 passed`(F3クローズ時点の170 + 今回追加9件)。`ruff check`もクリーン。
+- 並行実行の回帰テスト(F3の2件+F4の2件、計4件)は5回連続実行で安定。
+
+## 次タスクへの残課題(今回も意図的に未着手)
 
 adversarial security reviewで報告した残りのfindings。修正には別途ユーザーの承認が必要。
 
 | ID | 深刻度 | 内容 | file:line(発見時点) |
 |---|---|---|---|
-| F1 | MEDIUM | `check_not_retail_arbitrage`がキーワード充足のみで判定しており、内容が実質曖昧でも1つの卸キーワードで通過してしまう(コンプライアンス判定の内容非依存性) | `guardrails/__init__.py:63-79` |
-| F2 | MEDIUM | バイパス検知の静的テストがbasenameのみでファイルを許可判定しており、無関係な`do.py`/`gateway.py`/`client.py`同名ファイルを誤って除外する。また`f".{method}("`の素朴な部分文字列一致がエイリアス代入/`getattr`によるreflectionを検出できない | `tests/test_guardrail_gateway.py:138-146` |
-| F4 | MEDIUM | F3と同型の並行実行脆弱性がpublish/price_changeにも構造的に存在する(実害はeBay側のPUT冪等性・重複offer検知で部分緩和されるため実行はしていない) | `orchestrator/do.py`(`execute_publish`/`execute_price_change`) |
 | F5 | LOW | eBay APIの上流エラー本文(`response.text`)が`payload.failure_reason`としてDB保存され、認証済みAPIの`GET /proposals`から閲覧可能(トークン自体は含まれない) | `adapters/ebay/auth.py:73`、`adapters/ebay/client.py:122,162,175,181,188` |
 | F6 | LOW | 承認Web UIのBasic認証(`require_auth`)が未知usernameで`secrets.compare_digest`を短絡評価するタイミングサイドチャネル(username列挙の可能性) | `api/__init__.py:70` |
 | F7 | LOW | `WITHDRAW`は承認ゲートを通過するが`run_do`にexecutorが無く実行経路が存在しない(未実装、実害なし) | `orchestrator/do.py`(`run_do`) |
 
-併せて、境界値(`estimated_profit==min_net_profit`等の厳密な閾値一致)・真の並行実行シナリオを検証する
-テストがguardrails/idempotency全体に不足している(「テスト欠落」としてレビューで指摘済み)。F3の
-回帰テストはpurchase一系統のみをカバーしており、F4着手時には同様の並行実行テストをpublish/price_change
-にも追加する必要がある。
+併せて、境界値(`estimated_profit==min_net_profit`等の厳密な閾値一致)を検証するテストが
+guardrails全体に不足している(「テスト欠落」としてレビューで指摘済み、F1/F2/F4の修正では対応していない)。

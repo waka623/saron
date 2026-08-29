@@ -117,14 +117,20 @@ def execute_publish(
                 raise
             repository.update_payload(p.id, payload)
 
+        # F4: item/offer作成(PUT/duplicate検知で既にidempotentな2ステップ)とは別に、最後の
+        # publish_offer呼び出しとexecutedへの確定は F3(execute_purchase)と同じ原子的な条件付き
+        # 更新(claimed_execution、SAVEPOINT)で直列化する。実行権を獲得できなければ
+        # AlreadyClaimedError が送出され、publish_offer は一切呼ばれない。
         try:
-            result = ebay_client.publish_offer(payload["ebay_offer_id"])
+            with repository.claimed_execution(p.id, decided_by="orchestrator"):
+                result = ebay_client.publish_offer(payload["ebay_offer_id"])
+                payload["ebay_listing_id"] = result.get("listingId")
+                repository.update_payload(p.id, payload)
+        except AlreadyClaimedError:
+            raise
         except EbayApiError as exc:
             repository.mark_failed(p.id, decided_by="orchestrator", reason=f"publish失敗: {exc}")
             raise
-        payload["ebay_listing_id"] = result.get("listingId")
-        repository.update_payload(p.id, payload)
-        repository.mark_executed(p.id, decided_by="orchestrator")
 
     execute_side_effect(
         proposal,
@@ -172,17 +178,21 @@ def execute_price_change(
             repository.update_payload(p.id, payload)
             return
 
+        # F4: execute_publishと同様、外部呼び出し(update_offer)とexecutedへの確定を
+        # claimed_execution(SAVEPOINT)で直列化する。
         try:
-            ebay_client.update_offer(
-                offer_id,
-                {"pricingSummary": {"price": {"value": str(proposed_price), "currency": "USD"}}},
-            )
+            with repository.claimed_execution(p.id, decided_by="orchestrator"):
+                ebay_client.update_offer(
+                    offer_id,
+                    {"pricingSummary": {"price": {"value": str(proposed_price), "currency": "USD"}}},
+                )
+                payload["applied_price"] = proposed_price
+                repository.update_payload(p.id, payload)
+        except AlreadyClaimedError:
+            raise
         except EbayApiError as exc:
             repository.mark_failed(p.id, decided_by="orchestrator", reason=f"価格変更失敗: {exc}")
             raise
-        payload["applied_price"] = proposed_price
-        repository.update_payload(p.id, payload)
-        repository.mark_executed(p.id, decided_by="orchestrator")
 
     execute_side_effect(
         proposal,
