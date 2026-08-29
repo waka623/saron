@@ -12,7 +12,13 @@ eBay 上で **卸直送型の無在庫ドロップシッピング** を、承認
 3. `compliance.md` — eBay の無在庫・ドロップシッピング規約とレート制限
 4. `DECISIONS.md` — これまでの設計判断の記録
 
-## 現在のステータス: Phase 2(データモデル+承認基盤)完了
+## 現在のステータス: Phase 3(Plan: リサーチ+出品ドラフト生成)完了
+
+- `research/`: `evaluate_candidate`(ルールベース、LLM不使用)+ `MarketDataProvider`(Mock/Browse API、
+  Sandbox/本番切替可能)。除外カテゴリ・相場データ無し・需要薄い・競合過多・目標割れ原価のケースを含む。
+- `listing/`: `generate_draft`(ルールベース)+ `ListingCopyGenerator`(現状はテンプレート実装。将来 LLM 実装に
+  差し替え可能だが、判断は常にルールベースのまま・出力は禁止表現チェックを必ず通す)。
+- `pricing.calculate_net_profit` を実装(Decimal固定)。research/listingで共有。
 
 - Phase 0:ディレクトリ雛形・依存定義(`pyproject.toml`)・`.env.example` を作成。利益ガードの数値(目標利益率20%/最低純利益$5)と
   除外カテゴリ(6項目)は `.env` に定数として確定済み(`DECISIONS.md` 参照)。

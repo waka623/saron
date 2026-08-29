@@ -77,6 +77,39 @@
 - **proposals テーブル:** 共通エンベロープの全フィールド(`proposal_type/priority/summary/rationale/risk_level/
   estimated_profit/requires_human_approval/payload`)に加えて `status/decided_by/decided_at/created_at/id` を持つ
   (`store/models.py::ProposalRecord`)。
+
+## Phase 3
+
+- **`pricing.calculate_net_profit` の前倒し実装:** 当初 Phase 6 実装予定だったが、research/listing 双方が
+  純利益計算を必要とするため Phase 3 で先に実装(`fee = price * fee_pct/100`、`net = price - cost - fee - shipping`)。
+  Phase 6 の価格・次アクション判断エージェントもこの共通関数を再利用する。
+- **リサーチ判断(`research/`)はルールベースで決定論的に実装。** `evaluate_candidate` は
+  (1) 除外カテゴリ→hold、(2) 相場データ無し→hold(要確認、推測しない)、(3) 利益ガード未達(目標利益率20% or
+  最低純利益$5)→none、(4) 需要弱(直近30日販売<3件)or競合過多(出品数>=30)→none、(5) それ以外→hold(候補を次段へ、
+  `payload.recommended=True`)の5分岐。`AGENT_PROMPTS.md`のマッピング表どおり `proposal_type` は
+  `none`/`hold` のみ(研究段階では書き込みを伴わないため)。
+- **ゴールデンケースの扱い:** `AGENT_PROMPTS.md` にはリサーチ/出品ドラフトの具体的な数値入出力例が無い
+  (価格・次アクション判断エージェントのみ具体例あり。これは Phase 6 で実装時に検算のうえゴールデンにする)。
+  そのため Phase 3 は独自の現実的なフィクスチャ(相場中央値$29.99・原価$12〜$28・送料$3.50・手数料13%)を用意し、
+  手計算で検算(例: 10.5913 = 29.99-12.00-3.8987-3.50)してから `tests/test_research.py`・`tests/test_listing.py`
+  にゴールデンとして固定した。数値・判断(proposal_type/recommended/missing_item_specifics等)は完全一致、
+  タイトル・説明文などの自由文は性質検証(必須キーワード含有・禁止表現不在・納期の正直な記載・
+  必須item specifics充足)にとどめている。エッジケース(相場データ無し・需要薄い・競合過多・目標割れ原価)を
+  すべて含めた。
+- **Browse APIアダプタ:** `EbayClient.search_competitive_listings`(Browse API `item_summary/search`)を実装し、
+  `research/market_data.py` に `MarketDataProvider` 抽象インターフェース + `MockMarketDataProvider`(テスト/開発用
+  フィクスチャ)+ `EbayBrowseMarketDataProvider`(実API、`EbayClient.sandbox`でSandbox/本番を切替、コード変更不要)を
+  用意。Phase 1と同じ方針で、実キー未着のため `httpx.MockTransport` でSandbox疎通を模擬してテスト。
+  既知の制約: Browse APIは直近販売実績を提供しないため `recent_sales_30d` は常に `None`
+  (売れ行きシグナルが必要な場合は将来 Analytics/Marketplace Insights 統合が必要、と明記)。
+  Taxonomy API(カテゴリ・item specifics定義の自動取得)は今回未実装 — `required_item_specifics` は
+  呼び出し側が指定する入力のまま(将来必要になれば同様のインターフェース越しに追加)。
+- **LLM不使用の恒久ルールをコードで表現:** `listing/copy_generator.py` に `ListingCopyGenerator` 抽象
+  インターフェースを置き、現時点の唯一の実装 `TemplateListingCopyGenerator` は決定論的なテンプレートのみで
+  文面を生成する(判断は一切行わない)。`listing.generate_draft` 側は生成された文面に対して禁止表現チェック
+  (`FORBIDDEN_CLAIM_WORDS`)を必ず実行し、違反があれば publish させず hold にする。将来 LLM 版の
+  ジェネレータを追加しても、この構造(判断はルールベース/LLMは文面のみ/出力は必ずチェックを通す)は変わらない。
+  research 側にも同様の恒久ルールをモジュールdocstringに明記した(候補可否は常にルールベース)。
 - **技術スタック:** `references/architecture.md`(スキル)の提案どおり Python 3.11+ / FastAPI / SQLAlchemy+Alembic /
   APScheduler / pytest を採用。変更の必要が出たらここに追記する。
 - **本コミットのスコープ:** ディレクトリ雛形・空インターフェース(ABC/pydanticモデル)・guardrails の TODO とスケルテストのみ。

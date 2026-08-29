@@ -17,6 +17,7 @@ SANDBOX_API_BASE = "https://api.sandbox.ebay.com"
 PRODUCTION_API_BASE = "https://api.ebay.com"
 
 RATE_LIMIT_PATH = "/developer/analytics/v1_beta/rate_limit/"
+BROWSE_SEARCH_PATH = "/buy/browse/v1/item_summary/search"
 
 
 class EbayApiError(Exception):
@@ -102,9 +103,16 @@ class EbayClient:
                     )
         return statuses
 
-    # --- Browse / Taxonomy (Phase 3) ---
+    # --- Browse (Phase 3) ---
     def search_competitive_listings(self, keywords: str, category_id: str | None = None) -> list[dict]:
-        raise NotImplementedError("Phase 3 で実装")
+        """Browse API の item_summary/search(読み取り専用)。相場・競合点数の算出に使う。"""
+        params: dict = {"q": keywords}
+        if category_id:
+            params["category_ids"] = category_id
+        data = self._get(BROWSE_SEARCH_PATH, params=params)
+        return data.get("itemSummaries", [])
+
+    # --- Taxonomy (Phase 4 で必要になったら実装) ---
 
     # --- Inventory (Phase 4) ---
     def create_or_update_inventory_item(self, sku: str, payload: dict) -> dict:

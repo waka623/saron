@@ -11,5 +11,10 @@ def evaluate_next_action(listing_id: str) -> Proposal:
 
 
 def calculate_net_profit(price: Decimal, cost: Decimal, fee_pct: Decimal, shipping: Decimal) -> Decimal:
-    """純利益 = 価格 − 原価 − eBay手数料 − 送料。金額は Decimal 固定(float禁止)。"""
-    raise NotImplementedError("Phase 6 で実装")
+    """純利益 = 価格 − 原価 − eBay手数料 − 送料。金額は Decimal 固定(float禁止)。
+
+    fee_pct はパーセント表記の整数/小数(例: 13 は 13%)。research/listing からも共通で使う
+    (Phase 6 の想定より前倒しで実装。DECISIONS.md 参照)。
+    """
+    fee = price * (fee_pct / Decimal(100))
+    return price - cost - fee - shipping
