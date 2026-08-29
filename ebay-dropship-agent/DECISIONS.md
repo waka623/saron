@@ -334,3 +334,74 @@
   importされていたアプリ側ロガー(`ebay_dropship.alerts`等)が無効化され、以降ログが一切出なくなる
   問題があった。テストスイート全体を実行した際に(`test_alembic_migrations.py`が`test_alerts.py`より先に
   収集・実行されることで)顕在化して発覚。`fileConfig(..., disable_existing_loggers=False)`に修正した。
+
+## Phase 7後: アドバーサリアルセキュリティレビューとF3(HIGH)の修正(2026-08-29)
+
+Phase 7完了後、ユーザー指示で `guardrails/` を中心にコード無変更のアドバーサリアルレビューを実施した
+(6観点: deny by default / バイパス経路 / 実行時再検証 / 冪等性・並行実行 / 利益ガード正しさ / 秘密情報)。
+各観点につき実際に反例(悪意ある入力・並行実行等)を試行し、7件のfindingsを報告した
+(F1〜F7、severity: HIGH×1 / MEDIUM×3 / LOW×3)。ユーザーはレビューを承認のうえ、**今回のタスクスコープを
+F3(HIGH)の修正のみに限定**し、F1/F2/F4〜F7は次タスクへの残課題としてここに記録するよう指示した。
+
+### F3(解消済み): 承認済みpurchase提案の並行実行による二重発注
+
+- **問題**: `orchestrator/do.py::execute_purchase`は、`guardrails/gateway.py::execute_side_effect`の
+  `proposal.status != APPROVED`チェックが呼び出し元スナップショットに対する判定でしかなく、
+  `store/repository.py::_transition`(get-then-set、DBロック無し)も状態遷移を原子的に保証していなかった。
+  このため、同一の承認済みproposalに対して`execute_purchase`が(手動実行の重複・cronとAPIトリガーの
+  重なり等の運用上の偶発を含め)並行に呼ばれると、両方が`purchase_channel.submit_purchase`まで到達し、
+  同一order_idに対する発注が実際に2回発行されてしまう(状態機械の`InvalidTransitionError`は2回目の
+  `mark_executed`でしか衝突を検知せず、その時点で外部副作用は既に2回実行済み)。
+  レビュー時に`race_repro.py`(スクラッチ、実コードを2スレッドから独立セッションで並行実行)で実証済み。
+- **回帰テスト(先に作成しred確認)**: `tests/test_orchestrator_purchase_concurrency.py`
+  - `test_concurrent_execute_purchase_from_two_threads_only_one_actually_purchases`
+    (2スレッド・各自独立したDBセッション/サプライヤー/発注チャネルインスタンスで`threading.Barrier`により
+    完全同時到達を強制)
+  - `test_concurrent_execute_purchase_from_two_processes_only_one_actually_purchases`
+    (2プロセス、`multiprocessing`(forkコンテキスト)+`multiprocessing.Barrier`。インプロセスロックが
+    一切効かない、より強い並行性の証明)
+    修正前のコードに対してこの2テストと同等のロジックを実行し、両方とも`submit_purchase`が
+    2回呼ばれること(二重発注)を確認した(scratch上で実行。テストファイル自体は修正後APIに依存する
+    ため、pre-fix確認はスクラッチ複製で実施。手順・結果は本セッションの会話ログ参照)。
+- **修正方針**: DBレベルの原子的な条件付き更新(compare-and-set)を主保証とした。
+  - `store/repository.py`: `SqlProposalRepository.claim_for_execution(proposal_id, decided_by) -> bool`
+    (`UPDATE proposals SET status='executed' WHERE id=? AND status='approved'`、影響行数==1のみTrue)。
+  - `store/repository.py`: `SqlProposalRepository.claimed_execution(proposal_id, decided_by)`
+    (contextmanager)。`claim_for_execution`と実際の副作用(発注)呼び出しを1つのSAVEPOINT
+    (`session.begin_nested()`)として直列化する。実行権を獲得できなければ`AlreadyClaimedError`
+    (新規、`InvalidTransitionError`のサブクラス)を送出し中身を一切実行しない。副作用が失敗した場合は
+    claimによる`executed`への変更を含めてSAVEPOINT全体がロールバックされ、`status`は`approved`に戻る
+    (その後`mark_failed`で理由付き`failed`へ遷移させるのは呼び出し側=`execute_purchase`の責務)。
+  - `orchestrator/do.py::execute_purchase`のexecutorクロージャを、`purchase_channel.submit_purchase`
+    呼び出し(および冪等再開パスの`mark_executed`相当処理)が`repository.claimed_execution`を経由する
+    よう再構成した。`AlreadyClaimedError`は再送出のみ(追加の状態遷移をしない=勝者側の確定状態を壊さない)、
+    それ以外の例外は`mark_failed`で理由を記録してから再送出する(挙動は修正前と同じ)。
+  - **多層防御**: `purchase_channel.submit_purchase`への発注は`PurchaseOrderPacket.order_id`を鍵とした
+    冪等キーとして扱われており(`ManualOrderPurchaseChannel`は同一order_idを`duplicate`として扱う、
+    既存の`test_purchase_channel_itself_treats_duplicate_submission_idempotently`で検証済み)、これは
+    そのまま維持した(主保証はDBレベルCASであり、チャネル側の冪等性は補助的な多層防御と位置づける)。
+  - in-processのロック/single-flightは追加していない(ユーザー指示どおり「補助に留め主保証にしない」
+    ため。DBレベルCASのみで複数プロセスでも正しく機能することを上記2テストで実証済み)。
+  - `gateway.py`・publish/price_change側のコードは一切変更していない(F3のみに変更範囲を限定)。
+- **修正後の検証**: 上記2つの回帰テストがgreen(5回連続実行で安定)。
+  全170テスト(既存168+新規2)がpass。`ruff check`もクリーン。
+  並行実行のたびに「実発注はちょうど1回・敗者側は`AlreadyClaimedError`というクリーンな拒否
+  (クラッシュや無関係な例外ではない)」であることを両テストで確認した。
+
+### 次タスクへの残課題(今回は意図的に未着手。ユーザー指示によりスコープ外)
+
+adversarial security reviewで報告した残りのfindings。修正には別途ユーザーの承認が必要。
+
+| ID | 深刻度 | 内容 | file:line(発見時点) |
+|---|---|---|---|
+| F1 | MEDIUM | `check_not_retail_arbitrage`がキーワード充足のみで判定しており、内容が実質曖昧でも1つの卸キーワードで通過してしまう(コンプライアンス判定の内容非依存性) | `guardrails/__init__.py:63-79` |
+| F2 | MEDIUM | バイパス検知の静的テストがbasenameのみでファイルを許可判定しており、無関係な`do.py`/`gateway.py`/`client.py`同名ファイルを誤って除外する。また`f".{method}("`の素朴な部分文字列一致がエイリアス代入/`getattr`によるreflectionを検出できない | `tests/test_guardrail_gateway.py:138-146` |
+| F4 | MEDIUM | F3と同型の並行実行脆弱性がpublish/price_changeにも構造的に存在する(実害はeBay側のPUT冪等性・重複offer検知で部分緩和されるため実行はしていない) | `orchestrator/do.py`(`execute_publish`/`execute_price_change`) |
+| F5 | LOW | eBay APIの上流エラー本文(`response.text`)が`payload.failure_reason`としてDB保存され、認証済みAPIの`GET /proposals`から閲覧可能(トークン自体は含まれない) | `adapters/ebay/auth.py:73`、`adapters/ebay/client.py:122,162,175,181,188` |
+| F6 | LOW | 承認Web UIのBasic認証(`require_auth`)が未知usernameで`secrets.compare_digest`を短絡評価するタイミングサイドチャネル(username列挙の可能性) | `api/__init__.py:70` |
+| F7 | LOW | `WITHDRAW`は承認ゲートを通過するが`run_do`にexecutorが無く実行経路が存在しない(未実装、実害なし) | `orchestrator/do.py`(`run_do`) |
+
+併せて、境界値(`estimated_profit==min_net_profit`等の厳密な閾値一致)・真の並行実行シナリオを検証する
+テストがguardrails/idempotency全体に不足している(「テスト欠落」としてレビューで指摘済み)。F3の
+回帰テストはpurchase一系統のみをカバーしており、F4着手時には同様の並行実行テストをpublish/price_change
+にも追加する必要がある。

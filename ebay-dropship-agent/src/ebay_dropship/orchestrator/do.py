@@ -21,7 +21,12 @@ eBay Sell API(Inventory)の書き込みメソッドを呼ぶ、唯一の場所�
   途中で失敗したら repository.mark_failed で理由を記録し、例外を再送出する
   (proposals.status が EXECUTED と FAILED の中間の状態のまま残ることはない)。
 - proposal は一度 EXECUTED/FAILED になると `store/repository.py` の状態機械により
-  二度と実行され得ない(同じ提案の二重実行はここでも構造的に防止される)。
+  二度と実行され得ない。ただし publish/price_change はこの状態機械を get-then-set
+  (`_transition`)で更新しており、並行実行(同一proposalへの同時呼び出し)そのものを
+  防ぐ排他制御ではない(既知の残課題。DECISIONS.md参照)。
+  purchase(execute_purchase)は `repository.claimed_execution` によるDBレベルの
+  原子的な条件付き更新(compare-and-set)で実行権を獲得してから発注するため、
+  並行実行下でも `purchase_channel.submit_purchase` が二重に呼ばれることはない。
 """
 
 from __future__ import annotations
@@ -39,7 +44,7 @@ from ebay_dropship.guardrails.gateway import GuardrailDenied, execute_side_effec
 from ebay_dropship.orders import DEFAULT_EBAY_FEE_PCT
 from ebay_dropship.orders.purchase_channel import PurchaseChannel, PurchaseOrderPacket
 from ebay_dropship.pricing import calculate_net_profit
-from ebay_dropship.store.repository import SqlProposalRepository
+from ebay_dropship.store.repository import AlreadyClaimedError, SqlProposalRepository
 from ebay_dropship.supplier import SupplierAdapter
 
 
@@ -261,29 +266,46 @@ def execute_purchase(
             return
 
         if payload.get("purchase_reference_id"):
-            # 中断からの再開: 既に発注パケットを記録済み(冪等。二重発注しない)。
-            repository.mark_executed(p.id, decided_by="orchestrator")
+            # 中断からの再開: 既に発注パケットを記録済み(冪等。submit_purchaseは呼ばない)。
+            # 実行権の獲得(executedへの遷移)自体は他の実行者と競合しうるため、ここも
+            # claimed_execution 経由の原子的な条件付き更新で行う。
+            with repository.claimed_execution(p.id, decided_by="orchestrator"):
+                pass
             return
 
-        packet = PurchaseOrderPacket(
-            order_id=payload["order_id"],
-            sku=sku,
-            quantity=requested_quantity,
-            unit_cost=stock.cost,
-            supplier_name="csv_supplier",
-            ship_to_country=payload.get("ship_to_country", ""),
-        )
-        result = purchase_channel.submit_purchase(packet)
-        if result.status == "failed":
-            repository.mark_failed(p.id, decided_by="orchestrator", reason=f"発注記録失敗: {result.detail}")
-            raise RuntimeError(result.detail)
+        # F3: 発注権の獲得(DBレベルの原子的な条件付き更新)と実際の発注呼び出しを
+        # 1つのSAVEPOINTとして直列化する。実行権を獲得できなければ AlreadyClaimedError が
+        # 送出され、submit_purchase は一切呼ばれない(二重発注防止の主保証)。
+        # 発注呼び出し自体が失敗した場合は、このSAVEPOINT(claimによるexecutedへの変更を含む)
+        # がまるごとロールバックされ status は approved に戻るため、その後 mark_failed で
+        # 理由付きの failed へ遷移させる。
+        try:
+            with repository.claimed_execution(p.id, decided_by="orchestrator"):
+                packet = PurchaseOrderPacket(
+                    order_id=payload["order_id"],
+                    sku=sku,
+                    quantity=requested_quantity,
+                    unit_cost=stock.cost,
+                    supplier_name="csv_supplier",
+                    ship_to_country=payload.get("ship_to_country", ""),
+                )
+                result = purchase_channel.submit_purchase(packet)
+                if result.status == "failed":
+                    raise RuntimeError(result.detail)
 
-        payload["purchase_reference_id"] = result.reference_id
-        payload["purchase_status"] = result.status
-        payload["supplier_cost"] = stock.cost
-        payload["recalculated_profit"] = current_profit
-        repository.update_payload(p.id, payload)
-        repository.mark_executed(p.id, decided_by="orchestrator")
+                payload["purchase_reference_id"] = result.reference_id
+                payload["purchase_status"] = result.status
+                payload["supplier_cost"] = stock.cost
+                payload["recalculated_profit"] = current_profit
+                repository.update_payload(p.id, payload)
+        except AlreadyClaimedError:
+            # 既に他の実行者が実行権を獲得済み(勝者側がexecuted/failedを確定させている)。
+            # ここでは副作用を何も呼んでおらず、追加の状態遷移も行わない。
+            raise
+        except Exception as exc:
+            # 発注権は獲得できたが発注呼び出し自体が失敗した(SAVEPOINTロールバック済みでstatusはapproved)。
+            repository.mark_failed(p.id, decided_by="orchestrator", reason=f"発注記録失敗: {exc}")
+            raise
 
     execute_side_effect(
         proposal,

@@ -5,12 +5,14 @@ products/listings/orders/cycles/metrics/audit_log/suppliers は該当フェー�
 from ebay_dropship.store.db import create_engine_from_settings, create_session_factory
 from ebay_dropship.store.models import Base, ProposalRecord
 from ebay_dropship.store.repository import (
+    AlreadyClaimedError,
     InvalidTransitionError,
     ProposalNotFoundError,
     SqlProposalRepository,
 )
 
 __all__ = [
+    "AlreadyClaimedError",
     "Base",
     "InvalidTransitionError",
     "ProposalNotFoundError",

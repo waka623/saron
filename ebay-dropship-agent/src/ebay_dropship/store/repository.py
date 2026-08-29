@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 
 from sqlalchemy import select
+from sqlalchemy import update as sa_update
 from sqlalchemy.orm import Session
 
 from ebay_dropship.approval import ApprovalQueue, Proposal, ProposalStatus
@@ -17,6 +20,15 @@ class InvalidTransitionError(Exception):
 
 class ProposalNotFoundError(Exception):
     pass
+
+
+class AlreadyClaimedError(InvalidTransitionError):
+    """claim_for_execution/claimed_execution で実行権を獲得できなかった(既に他の実行者が処理済み)。
+
+    二重発注防止の主保証(F3): 呼び出し元はこの例外を受け取った時点で副作用(発注等)を
+    一切呼んでおらず、mark_failed 等の追加の状態遷移も行ってはならない
+    (勝者側が既に executed/failed のいずれかへ確定させているため)。
+    """
 
 
 # pending → approved/rejected → executed/failed。それ以外の遷移(逆行・終端状態からの変更等)は禁止。
@@ -128,3 +140,40 @@ class SqlProposalRepository(ApprovalQueue):
         record.payload = payload
         self._session.flush()
         return _to_domain(record)
+
+    def claim_for_execution(self, proposal_id: str, decided_by: str) -> bool:
+        """DBレベルの原子的な条件付き更新(compare-and-set)で実行権を獲得する(F3の主保証)。
+
+        `UPDATE proposals SET status='executed' WHERE id=? AND status='approved'` を発行し、
+        影響行数が1のときだけ実行権を獲得できたとみなして True を返す。0のときは既に他の
+        実行者が実行権を獲得済み(または approved 以外の状態)であり False を返す ――
+        呼び出し元はこの場合、実際の副作用(発注・出品等)を絶対に呼んではならない。
+
+        `_transition`(get-then-set)と異なり、この一文のUPDATEはDBのロックで直列化されるため、
+        複数プロセス/複数スレッドから同時に呼ばれても「影響行数1」を得るのはちょうど1者だけになる。
+        """
+        stmt = (
+            sa_update(ProposalRecord)
+            .where(ProposalRecord.id == proposal_id, ProposalRecord.status == ProposalStatus.APPROVED)
+            .values(status=ProposalStatus.EXECUTED, decided_by=decided_by, decided_at=datetime.now(UTC))
+        )
+        result = self._session.execute(stmt)
+        return result.rowcount == 1
+
+    @contextmanager
+    def claimed_execution(self, proposal_id: str, decided_by: str) -> Iterator[None]:
+        """`claim_for_execution` と実際の副作用を1つのSAVEPOINTとして直列化する(F3)。
+
+        実行権を獲得できなければ `AlreadyClaimedError` を送出し、withブロックの中身
+        (実際の発注呼び出し等)は一切実行しない。実行権を獲得できた場合、withブロック内で
+        例外が送出されると、この呼び出しによる status='executed' への変更を含めてSAVEPOINT
+        全体がロールバックされる(status は 'approved' に戻る)。ロールバック後に 'failed' へ
+        遷移させ理由を記録するかどうかは、事情を一番よく知る呼び出し側の責務とする。
+        """
+        with self._session.begin_nested():
+            if not self.claim_for_execution(proposal_id, decided_by):
+                raise AlreadyClaimedError(
+                    f"proposal {proposal_id} は既に他の実行者が実行権を獲得済みです"
+                    "(二重発注防止のため、この実行者は副作用を呼ばずに処理を中断しました)。"
+                )
+            yield
