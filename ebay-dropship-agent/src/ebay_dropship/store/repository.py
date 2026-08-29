@@ -73,6 +73,10 @@ class SqlProposalRepository(ApprovalQueue):
         stmt = select(ProposalRecord).where(ProposalRecord.status == ProposalStatus.PENDING)
         return [_to_domain(r) for r in self._session.scalars(stmt)]
 
+    def list_approved(self) -> list[Proposal]:
+        stmt = select(ProposalRecord).where(ProposalRecord.status == ProposalStatus.APPROVED)
+        return [_to_domain(r) for r in self._session.scalars(stmt)]
+
     def get(self, proposal_id: str) -> Proposal:
         return _to_domain(self._get_record(proposal_id))
 
@@ -112,5 +116,15 @@ class SqlProposalRepository(ApprovalQueue):
     def mark_failed(self, proposal_id: str, decided_by: str, reason: str) -> Proposal:
         record = self._transition(proposal_id, ProposalStatus.FAILED, decided_by)
         record.payload = {**record.payload, "failure_reason": reason}
+        self._session.flush()
+        return _to_domain(record)
+
+    def update_payload(self, proposal_id: str, payload: dict) -> Proposal:
+        """status は変更せず payload だけを更新する。実行途中の進捗(生成済みitem/offer id等)を、
+
+        原子性を壊さずに記録するために使う(中断・再試行時に完了済みステップを再実行しないようにする)。
+        """
+        record = self._get_record(proposal_id)
+        record.payload = payload
         self._session.flush()
         return _to_domain(record)

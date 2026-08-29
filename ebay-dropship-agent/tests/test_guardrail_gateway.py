@@ -132,9 +132,10 @@ def test_ebay_write_methods_are_only_called_through_guardrail_gateway():
     Phase 4 で実際の eBay 書き込みを実装する際、guardrails.gateway.execute_side_effect の
     executor コールバック以外から EbayClient.create_offer 等を呼ぶコードを追加すると、このテストが失敗する。
     """
-    write_methods = ("create_or_update_inventory_item", "create_offer", "publish_offer")
+    write_methods = ("create_or_update_inventory_item", "create_offer", "publish_offer", "update_offer")
     src_root = pathlib.Path(__file__).resolve().parents[1] / "src"
-    allowed_files = {"client.py", "gateway.py"}
+    # do.py は guardrails.gateway.execute_side_effect の executor として書き込みを行う、唯一許可された接続点。
+    allowed_files = {"client.py", "gateway.py", "do.py"}
 
     offending: list[str] = []
     for path in src_root.rglob("*.py"):

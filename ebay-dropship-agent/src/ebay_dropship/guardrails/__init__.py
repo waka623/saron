@@ -106,6 +106,29 @@ def check_rate_budget(calls_remaining: int, calls_needed: int) -> GuardrailResul
     return GuardrailResult.ok()
 
 
+REQUIRED_PUBLISH_PAYLOAD_KEYS: tuple[str, ...] = (
+    "title",
+    "description",
+    "category_id",
+    "list_price",
+    "handling_time_days",
+    "item_specifics",
+)
+
+
+def check_publish_payload_complete(payload: dict) -> GuardrailResult:
+    """実行直前の再検査(deny by default): 承認された時点の内容を鵜呑みにせず、必須項目の充足を再確認する。"""
+    missing = [key for key in REQUIRED_PUBLISH_PAYLOAD_KEYS if not payload.get(key)]
+    item_specifics = payload.get("item_specifics") or {}
+    empty_specifics = [key for key, value in item_specifics.items() if not value]
+    if missing or empty_specifics:
+        return GuardrailResult.deny(
+            f"publish実行直前の再検査で不備を検出: 不足キー={missing} 未入力item_specifics={empty_specifics}"
+            "(deny by default)。"
+        )
+    return GuardrailResult.ok()
+
+
 def check_supplier_stock(available_quantity: int, requested_quantity: int) -> GuardrailResult:
     """サプライヤー在庫が要求数量を満たせるか検査する。満たせなければ deny(hold扱い)。"""
     if requested_quantity <= 0:

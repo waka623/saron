@@ -110,6 +110,61 @@
   (`FORBIDDEN_CLAIM_WORDS`)を必ず実行し、違反があれば publish させず hold にする。将来 LLM 版の
   ジェネレータを追加しても、この構造(判断はルールベース/LLMは文面のみ/出力は必ずチェックを通す)は変わらない。
   research 側にも同様の恒久ルールをモジュールdocstringに明記した(候補可否は常にルールベース)。
+
+## Phase 4
+
+- **実装物:** `orchestrator/do.py`(`execute_publish` / `execute_price_change` / `run_do`)。
+  `guardrails.gateway.execute_side_effect` の executor として `EbayClient` の Inventory 書き込み
+  (`create_or_update_inventory_item` → `create_offer` → `publish_offer`、price_changeは`update_offer`)を
+  実際に接続した。`tests/test_guardrail_gateway.py` の静的バイパス検査は `do.py` を許可済み接続点として
+  更新し(`update_offer` も検査対象に追加)、それ以外のファイルからの書き込み呼び出しは引き続き検知する。
+- **切り分け:** このフェーズは「承認済みproposalを実行するだけ」。価格・出品可否の判断は research/listing/pricing の
+  責務のまま変更していない。price_changeのテストは承認済みの目標価格(`payload.proposed_price`)を持つ提案を
+  入力にしており、価格の自動算出はしていない(Phase 6のスコープ)。
+- **Inventory APIはフェイクで検証(実キー未着):** `tests/fakes/ebay_inventory_fake.py::FakeInventoryBackend` は
+  成功専用ではなく、要求どおり4つの失敗モードを再現する:
+  (1) publish拒否(item specifics不足/ポリシー違反、`errorId=25007`相当)、
+  (2) レート制限(offer作成時に429を返し続け、リトライ上限後にEbayApiErrorとして扱われる)、
+  (3) 部分成功(inventory_item・offerは成功するがpublishだけ失敗し、eBay側には実体が残るが
+  proposalはFAILEDのまま=中途半端なEXECUTEDにしない)、
+  (4) 重複(offer作成が「既に存在する」を返し、既存offer_idを再利用して公開まで進める=冪等)。
+  いずれも `tests/test_orchestrator_do.py` でexecutorがエラー処理を正しく通ることを確認済み。
+  **TODO(本番投入前の必須ゲート・未消化):** 実 Sandbox 認証情報が揃い次第、`EbayClient.from_settings()` で
+  実際に `execute_publish`/`execute_price_change` をSandboxに対してエンドツーエンドで実行し、
+  少なくとも1件の実出品・1件の実価格変更が成功することを人手で確認する。**このE2E検証が済むまで、
+  本番(`EBAY_ENV=production`)には絶対に進まない。**
+- **冪等性:**
+  - `create_or_update_inventory_item` は PUT(仕様上べき等)。同じSKUへの再送は上書きになり重複を生まない。
+  - `create_offer` が「既に存在する」を返した場合は `EbayOfferAlreadyExistsError` で既存offer_idを捕捉し
+    再利用する(新規offerを作らない)。
+  - 各ステップ成功のたびに `repository.update_payload` で `ebay_item_id`/`ebay_offer_id` を記録し、
+    次回実行時(中断からの再開)はこれらが既にあるステップを再実行しない
+    (`test_publish_retry_after_interrupted_attempt_skips_completed_steps` で検証)。
+  - さらに上位のガードとして、proposalが一度 `EXECUTED`/`FAILED`(終端状態)になった後は
+    `store/repository.py` の状態機械がどんな遷移も拒否するため、同一proposalの二重実行は構造的に不可能。
+- **原子性と監査:** 全ステップ成功後にのみ `repository.mark_executed`(item/offer/listing idはpayloadに保存済み)。
+  途中で失敗したら例外の直前に必ず `repository.mark_failed(reason=...)` を呼んでから再送出するため、
+  「承認済みのまま実は失敗していた」という中途半端な状態は残らない。監査ログ専用テーブル(`audit/` 実装)は
+  未着手のままだが、`status`・`decided_by`・`decided_at`・`payload`(失敗理由・生成id)が `proposals` テーブルに
+  確定的に記録される点で、最低限の監査可能性(誰が・いつ・結果どうなったか)は現状も担保している。
+  専用の `audit_log` テーブル化は将来必要になった時点で追加する。
+- **実行時再検査(deny by default、承認済みでも鵜呑みにしない):** `guardrails.gateway.execute_side_effect` は
+  実行の瞬間に毎回、(a) `status == APPROVED` か、(b) `requires_human_approval` の整合性、
+  (c) 卸直送であること(`rationale`のretail arbitrage検知)、(d) レート予算、
+  (e) price_change/purchaseなら利益ガードを**再計算**、(f) publishなら新設の
+  `check_publish_payload_complete`(必須項目・item specifics充足を再確認)を通す。
+  `test_price_change_blocked_by_profit_guard_reverification_at_execution_time` で、承認後に利益基準が
+  厳しくなった場合に実行がブロックされ `update_offer` へ一切到達しないことを確認済み。
+- **dry-runモード:** `dry_run=True` を渡すと、`EbayClient` へのHTTPアクセス(認証含む)を一切行わずに
+  送信予定のリクエスト内容(`inventory_item_request`/`offer_request`/`update_offer_request`)を
+  `payload.dry_run_preview` に記録するだけで終わる。proposalのstatusはAPPROVEDのまま変化しない。
+  ただし dry-run もguardrailsチェック自体は通過が必須(deny対象の提案をdry-runでも先読みさせない設計)。
+- **副次的なバグ修正:** `ProposalRecord.payload`(JSON列)に `Decimal` を直接保存しようとすると
+  標準の`json`エンコーダがエラーになることが本フェーズのテストで発覚(listing.generate_draftの
+  `list_price`は元々Decimalで、これまでのテストではpayloadに直接Decimalを入れていなかったため未発見だった)。
+  `store/models.py::DecimalSafeJSON`(TypeDecorator)でDecimalをタグ付き表現({"__decimal__": "29.99"})に
+  変換して保存し、読み出し時に自動でDecimalへ戻すようにした。DB上のカラム型はJSONのままでAlembicの
+  マイグレーション変更は不要。
 - **技術スタック:** `references/architecture.md`(スキル)の提案どおり Python 3.11+ / FastAPI / SQLAlchemy+Alembic /
   APScheduler / pytest を採用。変更の必要が出たらここに追記する。
 - **本コミットのスコープ:** ディレクトリ雛形・空インターフェース(ABC/pydanticモデル)・guardrails の TODO とスケルテストのみ。

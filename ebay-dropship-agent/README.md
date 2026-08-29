@@ -12,7 +12,19 @@ eBay 上で **卸直送型の無在庫ドロップシッピング** を、承認
 3. `compliance.md` — eBay の無在庫・ドロップシッピング規約とレート制限
 4. `DECISIONS.md` — これまでの設計判断の記録
 
-## 現在のステータス: Phase 3(Plan: リサーチ+出品ドラフト生成)完了
+## 現在のステータス: Phase 4(Do: 承認→出品/価格改定)完了
+
+- `orchestrator/do.py`: 承認済み(APPROVED)の publish/price_change を実行する `execute_publish` /
+  `execute_price_change` / `run_do`。`guardrails.gateway.execute_side_effect` の executor として
+  `EbayClient` のInventory書き込みを接続。冪等性(PUTの性質+重複offer再利用+終端状態による二重実行防止)・
+  原子性(全ステップ成功後にのみ`executed`、失敗時は理由付きで`failed`)・実行時再検査(deny by default)・
+  dry-runモードを実装。
+- 実キー未着のため `tests/fakes/ebay_inventory_fake.py` のフェイクでテスト(成功専用ではなく、
+  publish拒否・レート制限・部分成功・重複の4失敗モードを再現)。
+- **重要(TODO・未消化):** 実 Sandbox 認証情報でのエンドツーエンドE2Eは本番投入前の必須ゲート。
+  `DECISIONS.md` の Phase 4 節参照。これが済むまで `EBAY_ENV=production` には進まない。
+
+## 過去のステータス: Phase 3(Plan: リサーチ+出品ドラフト生成)完了
 
 - `research/`: `evaluate_candidate`(ルールベース、LLM不使用)+ `MarketDataProvider`(Mock/Browse API、
   Sandbox/本番切替可能)。除外カテゴリ・相場データ無し・需要薄い・競合過多・目標割れ原価のケースを含む。

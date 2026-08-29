@@ -17,6 +17,7 @@ from ebay_dropship.guardrails import (
     GuardrailResult,
     check_not_retail_arbitrage,
     check_profit_guard,
+    check_publish_payload_complete,
     check_rate_budget,
     check_requires_human_approval,
     check_supplier_stock,
@@ -67,6 +68,9 @@ def execute_side_effect(
 
     if proposal.proposal_type in PROFIT_GATED_TYPES:
         results.append(check_profit_guard(proposal.estimated_profit, settings.min_net_profit))
+
+    if proposal.proposal_type is ProposalType.PUBLISH:
+        results.append(check_publish_payload_complete(proposal.payload))
 
     if proposal.proposal_type is ProposalType.PURCHASE:
         if available_quantity is None or requested_quantity is None:

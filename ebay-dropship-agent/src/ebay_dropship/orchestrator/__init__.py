@@ -5,6 +5,12 @@
 
 from enum import StrEnum
 
+from ebay_dropship.adapters.ebay import EbayClient
+from ebay_dropship.approval import Proposal
+from ebay_dropship.config import Settings
+from ebay_dropship.orchestrator.do import run_do as _run_do
+from ebay_dropship.store.repository import SqlProposalRepository
+
 
 class PdcaPhase(StrEnum):
     PLAN = "plan"
@@ -15,10 +21,25 @@ class PdcaPhase(StrEnum):
 
 class Orchestrator:
     def run_plan(self) -> None:
-        raise NotImplementedError("Phase 3 で実装(research + listing)")
+        raise NotImplementedError("Phase 6 でスケジューラに統合(research/listing 自体は Phase 3 で実装済み)")
 
-    def run_do(self) -> None:
-        raise NotImplementedError("Phase 4 で実装(承認済み提案の実行)")
+    def run_do(
+        self,
+        *,
+        repository: SqlProposalRepository,
+        ebay_client: EbayClient,
+        settings: Settings,
+        calls_remaining: int,
+        dry_run: bool = False,
+    ) -> list[Proposal | Exception]:
+        """承認済み(APPROVED)の publish/price_change を実行する。実体は orchestrator/do.py。"""
+        return _run_do(
+            repository=repository,
+            ebay_client=ebay_client,
+            settings=settings,
+            calls_remaining=calls_remaining,
+            dry_run=dry_run,
+        )
 
     def run_check(self) -> None:
         raise NotImplementedError("Phase 6 で実装(analytics 集計)")

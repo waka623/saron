@@ -1,11 +1,15 @@
 """eBay Sell API クライアント。OAuth・レート制限・リトライを内包する。
 
-Phase 1 のスコープ:OAuth・レート制限クライアント・読み取り系の疎通確認(get_rate_limits)。
-Inventory/Fulfillment/Browse への書き込み・検索は Phase 3〜5 で実装する。
+Phase 1: OAuth・レート制限クライアント・読み取り系の疎通確認(get_rate_limits)。
+Phase 3: Browse(検索・読み取り専用)。
+Phase 4: Inventory の書き込み(inventory_item/offer/publish/update_offer)。
+Fulfillment(受注取得)は Phase 5 で実装する。
 """
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import httpx
@@ -18,10 +22,33 @@ PRODUCTION_API_BASE = "https://api.ebay.com"
 
 RATE_LIMIT_PATH = "/developer/analytics/v1_beta/rate_limit/"
 BROWSE_SEARCH_PATH = "/buy/browse/v1/item_summary/search"
+INVENTORY_ITEM_PATH = "/sell/inventory/v1/inventory_item"
+OFFER_PATH = "/sell/inventory/v1/offer"
+
+# eBay Inventory API のエラーコード。offer が既にSKUに紐づいて存在する場合(重複防止・冪等性のため参照)。
+DUPLICATE_OFFER_ERROR_ID = 25002
 
 
 class EbayApiError(Exception):
     pass
+
+
+class EbayOfferAlreadyExistsError(EbayApiError):
+    """create_offer が「既にこのSKUのofferが存在する」を返したとき。冪等な再利用のため既存offer_idを保持する。"""
+
+    def __init__(self, sku: str, existing_offer_id: str):
+        self.sku = sku
+        self.existing_offer_id = existing_offer_id
+        super().__init__(f"SKU={sku} のオファーは既に存在します(offerId={existing_offer_id})")
+
+
+def _extract_duplicate_offer_id(data: dict) -> str | None:
+    for error in data.get("errors", []):
+        if error.get("errorId") == DUPLICATE_OFFER_ERROR_ID:
+            for param in error.get("parameters", []):
+                if param.get("name") == "offerId":
+                    return param.get("value")
+    return None
 
 
 @dataclass
@@ -40,6 +67,7 @@ class EbayClient:
         sandbox: bool = True,
         http_client: httpx.Client | None = None,
         call_budget: CallBudget | None = None,
+        retry_sleep: Callable[[float], None] = time.sleep,
     ):
         self.sandbox = sandbox
         self.base_url = SANDBOX_API_BASE if sandbox else PRODUCTION_API_BASE
@@ -49,6 +77,7 @@ class EbayClient:
         )
         # 5000 は Sell API の代表的な日次上限の目安。実際の値は get_rate_limits() で都度確認する。
         self.call_budget = call_budget or CallBudget(daily_limit=5000)
+        self._retry_sleep = retry_sleep
 
     @classmethod
     def from_settings(cls, settings) -> EbayClient:
@@ -70,15 +99,24 @@ class EbayClient:
     def _authorized_headers(self) -> dict:
         return {"Authorization": f"Bearer {self.get_access_token()}"}
 
-    def _get(self, path: str, params: dict | None = None) -> dict:
+    def _request(
+        self, method: str, path: str, *, json: dict | None = None, params: dict | None = None
+    ) -> httpx.Response:
         self.call_budget.record_call()
 
         def do_request() -> httpx.Response:
-            return self._http.get(
-                f"{self.base_url}{path}", headers=self._authorized_headers(), params=params
+            return self._http.request(
+                method,
+                f"{self.base_url}{path}",
+                headers=self._authorized_headers(),
+                params=params,
+                json=json,
             )
 
-        response = retry_with_backoff(do_request)
+        return retry_with_backoff(do_request, sleep=self._retry_sleep)
+
+    def _get(self, path: str, params: dict | None = None) -> dict:
+        response = self._request("GET", path, params=params)
         if response.status_code >= 400:
             raise EbayApiError(f"{path} 呼び出しに失敗: {response.status_code} {response.text}")
         return response.json()
@@ -112,17 +150,42 @@ class EbayClient:
         data = self._get(BROWSE_SEARCH_PATH, params=params)
         return data.get("itemSummaries", [])
 
-    # --- Taxonomy (Phase 4 で必要になったら実装) ---
+    # --- Taxonomy (今回未使用。必要になれば同様のパターンで追加) ---
 
     # --- Inventory (Phase 4) ---
     def create_or_update_inventory_item(self, sku: str, payload: dict) -> dict:
-        raise NotImplementedError("Phase 4 で実装")
+        """PUT は仕様上べき等(同じSKUへの再送は上書きになり重複を生まない)。"""
+        response = self._request("PUT", f"{INVENTORY_ITEM_PATH}/{sku}", json=payload)
+        if response.status_code >= 400:
+            raise EbayApiError(
+                f"inventory_item({sku}) 更新に失敗: {response.status_code} {response.text}"
+            )
+        return response.json() if response.content else {}
 
     def create_offer(self, sku: str, payload: dict) -> dict:
-        raise NotImplementedError("Phase 4 で実装")
+        """既にSKUのofferが存在する場合は EbayOfferAlreadyExistsError を送出する(呼び出し側で冪等に再利用する)。"""
+        response = self._request("POST", OFFER_PATH, json={**payload, "sku": sku})
+        if response.status_code == 400:
+            data = response.json() if response.content else {}
+            existing_offer_id = _extract_duplicate_offer_id(data)
+            if existing_offer_id:
+                raise EbayOfferAlreadyExistsError(sku=sku, existing_offer_id=existing_offer_id)
+        if response.status_code >= 400:
+            raise EbayApiError(f"offer({sku}) 作成に失敗: {response.status_code} {response.text}")
+        return response.json()
 
     def publish_offer(self, offer_id: str) -> dict:
-        raise NotImplementedError("Phase 4 で実装")
+        response = self._request("POST", f"{OFFER_PATH}/{offer_id}/publish")
+        if response.status_code >= 400:
+            raise EbayApiError(f"publish_offer({offer_id}) に失敗: {response.status_code} {response.text}")
+        return response.json()
+
+    def update_offer(self, offer_id: str, payload: dict) -> dict:
+        """PUT は仕様上べき等(同じ内容の再送は同じ結果になる)。price_change 実行に使う。"""
+        response = self._request("PUT", f"{OFFER_PATH}/{offer_id}", json=payload)
+        if response.status_code >= 400:
+            raise EbayApiError(f"update_offer({offer_id}) に失敗: {response.status_code} {response.text}")
+        return response.json() if response.content else {}
 
     # --- Fulfillment (Phase 5) ---
     def get_orders(self, since: str | None = None) -> list[dict]:
