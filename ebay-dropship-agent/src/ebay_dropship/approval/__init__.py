@@ -2,6 +2,7 @@
 
 from abc import ABC, abstractmethod
 from datetime import datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
@@ -52,7 +53,7 @@ class Proposal(BaseModel):
     summary: str
     rationale: str
     risk_level: RiskLevel
-    estimated_profit: float | None = None
+    estimated_profit: Decimal | None = None  # 金額は Decimal 固定(float禁止)
     requires_human_approval: bool
     payload: dict[str, Any] = {}
     status: ProposalStatus = ProposalStatus.PENDING

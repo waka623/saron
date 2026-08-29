@@ -15,6 +15,9 @@ dependencies = [
   "click>=8.1",
 ]
 
+[project.scripts]
+ebay-dropship = "ebay_dropship.cli:cli"
+
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",

@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,15 +17,16 @@ class Settings(BaseSettings):
     supplier_api_base_url: str = ""
     supplier_api_key: str = ""
 
-    target_margin_pct: float = 20.0
-    min_net_profit: float = 5.0
+    # 金額・率は Decimal 固定(float禁止)。pydantic-settings は .env の文字列から Decimal へ直接変換する。
+    target_margin_pct: Decimal = Decimal(20)
+    min_net_profit: Decimal = Decimal("5.0")
     excluded_categories: str = (
         "luxury_brand_goods,authentication_required,hazmat,"
         "food_supplements_pharma,adult,gift_cards"
     )
 
     approval_ui_mode: str = "both"  # cli | web | both
-    approval_high_risk_discount_pct: float = 15.0
+    approval_high_risk_discount_pct: Decimal = Decimal(15)
 
     pdca_cycle: str = "daily"
 

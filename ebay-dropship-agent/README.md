@@ -12,14 +12,28 @@ eBay 上で **卸直送型の無在庫ドロップシッピング** を、承認
 3. `compliance.md` — eBay の無在庫・ドロップシッピング規約とレート制限
 4. `DECISIONS.md` — これまでの設計判断の記録
 
-## 現在のステータス: Phase 1(eBayアダプタ+認証)完了
+## 現在のステータス: Phase 2(データモデル+承認基盤)完了
 
 - Phase 0:ディレクトリ雛形・依存定義(`pyproject.toml`)・`.env.example` を作成。利益ガードの数値(目標利益率20%/最低純利益$5)と
   除外カテゴリ(6項目)は `.env` に定数として確定済み(`DECISIONS.md` 参照)。
 - Phase 1:`adapters/ebay/` に OAuth(自動リフレッシュ付き)・レート制限クライアント(コールバジェット+指数バックオフ)・
   読み取り系疎通確認(`get_rate_limits`)を実装。実 Sandbox キー未投入のためテストは `httpx.MockTransport` でモック。
   `EbayClient.from_settings()` が `.env` から認証情報を読むため、実キーを書き込むだけでコード変更なしに実疎通へ切り替わる。
-- `guardrails/` はまだコンプライアンス制約の TODO と、スキップ付きテストスケルトンのみ(`tests/test_guardrails.py`、Phase 2で実装)。
+- Phase 2:金額を `Decimal` 化(float禁止)。`guardrails/` を実装し deny-by-default を徹底(小売アービトラージ検知・
+  利益ガード・レート予算・在庫確認)。`guardrails/gateway.py` を副作用実行の唯一の入口にし、バイパスが無いことを
+  静的検査テストで担保。`store/`(SQLAlchemy、DB非依存)+ Alembic で `proposals` テーブルを作成。
+  承認CLI(`ebay-dropship proposals list/approve/reject`)で `pending→approved/rejected→executed/failed` の
+  状態遷移を強制。
+
+### 承認CLIの使い方
+
+```bash
+pip install -e ".[dev]"
+alembic upgrade head          # .env の DATABASE_URL に対して proposals テーブルを作成
+ebay-dropship proposals list
+ebay-dropship proposals approve <id> --by <名前>
+ebay-dropship proposals reject <id> --by <名前> --reason "理由"
+```
 
 ## セットアップ
 
