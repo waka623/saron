@@ -285,3 +285,52 @@
     サイクル機構(enqueue/skip判定・single-flight)自体の疎通を確認するだけに留めている。
     実運用に向けては、supplier全件走査→research、対象listing全件→pricingのタスク組み立てを
     別途統合する必要がある(将来のフェーズまたは追加対応)。
+
+## Phase 7(開発フェーズ最終回)
+
+- **api/(承認Web UI)は CLI と同一の `SqlProposalRepository`/`ApprovalQueue` を共有し、承認ロジックを
+  再実装していない。** エンドポイントは list/detail/approve/reject のみ(healthz除く)。
+  - **認証:** HTTP Basic。`.env` の `APPROVAL_API_USERS`(`username:password` カンマ区切り、複数運用者可)。
+    **未設定(空文字)なら誰も認証できない(fail-closed)** — `test_no_users_configured_means_nobody_can_authenticate`
+    で確認済み。認証されたusernameだけが`decided_by`になり、リクエストボディで`decided_by`や`status`、
+    `estimated_profit`等を送っても無視される(`test_client_supplied_extra_fields_are_ignored_not_honored`)。
+  - **高リスク確認ステップ:** `risk_level=high`の提案は`confirm=true`を明示しない限り承認できず409を返す
+    (`test_high_risk_approval_requires_confirmation`)。低リスクは即時承認可(`test_low_risk_approval_does_not_require_confirmation`)。
+  - **localhostバインド:** `Settings.approval_api_host`の既定値は`127.0.0.1`(`test_default_bind_host_is_localhost`)。
+    `ebay-dropship api serve`で起動。外部公開する場合のリバースプロキシ・TLS・追加認証は`GO_LIVE.md`の
+    段階有効化チェックリストに委ねる(このアプリ単体ではネットワークバインドの強制はできないため)。
+  - **「実行時ガード再検査はサーバ側で行いクライアントを信用しない」の実装上の意味:** このAPIは
+    publish/price_change/purchaseの実行(外部副作用)を一切公開しない設計にした
+    (`orchestrator/do.py`の実行関数を`api/`からimportしていない)。理由は次の2点:
+    (1) ユーザー要求が「最小Web UI(承認api/)」と明示的に承認・却下に限定されていたこと、
+    (2) 実行は引き続き`run_do`(バッチ)や個別の`execute_*`呼び出しが担い、そこでの実行時再検査
+    (Phase4/5で実装済みの`current_profit_override`・`check_publish_payload_complete`・鮮度再確認等)は
+    Web層の存在と完全に無関係であり、Web UIが何を送ってもこれをバイパスする経路が構造的に無い
+    (承認とは別の、独立したコードパスであるため)。将来「Webから実行もトリガーしたい」場合は、
+    別途エンドポイントを追加検討する(この段階では追加していない)。
+- **alerts/(アラート)は既定でログ出力のみ、`Notifier`インターフェースの背後に実装を置いた。**
+  - `LoggingNotifier`(既定)はメッセージ・重大度・関連proposal_id・理由(rationale転記)をログに出す。
+    `AlertSeverity.CRITICAL`は`logging.ERROR`にマップ(`test_logging_notifier_uses_error_level_for_critical`)。
+  - `DedupingNotifier`は`(category, related_proposal_id)`単位で抑制ウィンドウ(既定30分)を持ち、
+    重複抑制とレート制限を同じ機構で扱う(要求の「重複抑制/レート制限する」を1つのシンプルな
+    cooldown方式で満たした。設計判断として明記)。
+  - 在庫乖離(`stock_divergence`)・不採算(`unprofitable`)アラートは、対応する`hold`/`withdraw`
+    Proposalの`rationale`を`Alert.reason`にそのまま転記するため、アラート自体に「なぜ止まったか」が
+    含まれる(判断ロジック側とアラート文言側を二重管理しない)。レート逼迫(`rate_limit`)は
+    `CallBudget.is_near_limit()`から`alert_for_rate_budget`で組み立てる。
+  - `orchestrator/cycle.py::run_cycle`に`notifier`引数を追加し、hold/withdrawとして承認キューに
+    積まれた提案について自動的に通知する(`test_run_cycle_notifies_for_hold_proposals`)。CLIの
+    `cycle run-once`は`LoggingNotifier()`を既定で使う。
+- **実Sandbox E2Eゲートの最終化: `GO_LIVE.md`を新設し、各フェーズのDECISIONS.md TODOを集約した。**
+  ユーザー指定の(a)〜(d)の構成で書いた: (a)TODO一覧の表、(b)実キー到着後にOAuth/Inventory publish/
+  Inventory price_change/Fulfillment getOrders/Analytics get_rate_limitsを実Sandboxで通すチェックリスト、
+  (c)通過後もフラグOFFのまま1〜2出品・手動発注の限定ライブで監査ログとアラートを観察する期間、
+  (d)出品自動実行/価格改定自動実行/自動発注/API外部公開のそれぞれを独立した能力として、
+  人間が個別に明示的なgo-live判断を下すまで有効化しないこと。このチェックリストの実施(実キー投入・
+  フラグ変更)自体は本セッションのスコープ外(実キーが存在しないため)であり、あくまで次にやることの
+  一本化が今回の成果物である。
+- **副次的なバグ修正: `migrations/env.py`の`fileConfig`が既定で`disable_existing_loggers=True`だったため、**
+  同一プロセス内(将来のFastAPIアプリ起動時やCLI経由)で`alembic upgrade`を呼ぶと、その時点で既に
+  importされていたアプリ側ロガー(`ebay_dropship.alerts`等)が無効化され、以降ログが一切出なくなる
+  問題があった。テストスイート全体を実行した際に(`test_alembic_migrations.py`が`test_alerts.py`より先に
+  収集・実行されることで)顕在化して発覚。`fileConfig(..., disable_existing_loggers=False)`に修正した。

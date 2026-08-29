@@ -9,6 +9,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 import ebay_dropship.orchestrator.cycle as cycle_module
+from ebay_dropship.alerts import Alert, Notifier
 from ebay_dropship.approval import Priority, Proposal, ProposalType, RiskLevel
 from ebay_dropship.orchestrator.cycle import run_cycle
 from ebay_dropship.store import Base, SqlProposalRepository
@@ -75,6 +76,31 @@ def test_run_cycle_with_no_tasks_is_a_no_op(repo):
     assert result.plan_enqueued == []
     assert result.act_enqueued == []
     assert result.errors == []
+
+
+class _SpyNotifier(Notifier):
+    def __init__(self) -> None:
+        self.alerts: list[Alert] = []
+
+    def notify(self, alert: Alert) -> None:
+        self.alerts.append(alert)
+
+
+def test_run_cycle_notifies_for_hold_proposals(repo):
+    plan_tasks = [lambda: _proposal(ProposalType.HOLD)]
+    spy = _SpyNotifier()
+
+    run_cycle(repository=repo, plan_tasks=plan_tasks, act_tasks=[], notifier=spy)
+
+    assert len(spy.alerts) == 1
+
+
+def test_run_cycle_without_notifier_does_not_error(repo):
+    plan_tasks = [lambda: _proposal(ProposalType.HOLD)]
+
+    result = run_cycle(repository=repo, plan_tasks=plan_tasks, act_tasks=[])  # notifier省略
+
+    assert len(result.plan_enqueued) == 1
 
 
 def test_cycle_module_never_references_do_phase_execution():

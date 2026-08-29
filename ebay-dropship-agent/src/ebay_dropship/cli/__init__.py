@@ -5,6 +5,7 @@
     ebay-dropship proposals approve <id> --by <name>
     ebay-dropship proposals reject <id> --by <name> --reason "..."
     ebay-dropship cycle run-once
+    ebay-dropship api serve
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from contextlib import contextmanager
 
 import click
 
+from ebay_dropship.alerts import LoggingNotifier
 from ebay_dropship.config import settings
 from ebay_dropship.orchestrator.cycle import run_cycle
 from ebay_dropship.store import (
@@ -102,7 +104,7 @@ def run_cycle_once() -> None:
     """
     with _session() as session:
         repo = SqlProposalRepository(session)
-        result = run_cycle(repository=repo, plan_tasks=[], act_tasks=[])
+        result = run_cycle(repository=repo, plan_tasks=[], act_tasks=[], notifier=LoggingNotifier())
     click.echo(
         f"plan: enqueued={len(result.plan_enqueued)} skipped={len(result.plan_skipped)} | "
         f"act: enqueued={len(result.act_enqueued)} skipped={len(result.act_skipped)} | "
@@ -110,6 +112,21 @@ def run_cycle_once() -> None:
     )
     for exc in result.errors:
         click.echo(f"  error: {exc}", err=True)
+
+
+@cli.group()
+def api() -> None:
+    pass
+
+
+@api.command("serve")
+@click.option("--host", default=None, help="既定は settings.approval_api_host(127.0.0.1)")
+@click.option("--port", default=None, type=int, help="既定は settings.approval_api_port(8000)")
+def serve_api(host: str | None, port: int | None) -> None:
+    """承認Web UI(FastAPI)を起動する。既定でlocalhostのみにバインドする。"""
+    from ebay_dropship.api import run_api
+
+    run_api(host=host, port=port)
 
 
 if __name__ == "__main__":

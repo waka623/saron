@@ -11,8 +11,27 @@ eBay 上で **卸直送型の無在庫ドロップシッピング** を、承認
 2. `AGENT_PROMPTS.md` — 4エージェントのプロンプトと共通提案エンベロープ
 3. `compliance.md` — eBay の無在庫・ドロップシッピング規約とレート制限
 4. `DECISIONS.md` — これまでの設計判断の記録
+5. `GO_LIVE.md` — 本番投入前に必ず終わらせるチェックリスト(各フェーズのTODOを集約)
 
-## 現在のステータス: Phase 6(Check+Act: PDCAを閉じる)完了
+## 現在のステータス: Phase 7(ダッシュボード+運用)完了・開発フェーズ最終回
+
+- `api/`: 承認Web UI(FastAPI)。CLIと同じ `SqlProposalRepository` を共有(承認ロジックの再実装なし)。
+  `/healthz` 以外は HTTP Basic 認証必須(`APPROVAL_API_USERS`、未設定なら誰も認証できないfail-closed)。
+  認証されたusernameのみが`decided_by`になる(クライアントは指定不可)。`risk_level=high`の承認は
+  `confirm=true`の2段階確認が必須。既定でlocalhost(127.0.0.1)のみバインド。実行(publish/price_change/
+  purchase)はこのAPIでは一切行わない(承認/却下のみ)。`ebay-dropship api serve`で起動。
+- `alerts/`: `Notifier`抽象インターフェース + `LoggingNotifier`(既定、ログ出力のみ)+
+  `DedupingNotifier`(重複抑制/レート制限、抑制ウィンドウで同一対象への連続通知を抑える)。
+  在庫乖離・不採算アラートはhold/withdraw判断の`rationale`をそのまま`reason`に転記し、
+  「なぜ止まったか」が見えるようにしてある。`orchestrator/cycle.py::run_cycle`に`notifier`引数として接続。
+- `GO_LIVE.md`: 各フェーズのTODOを1つのgo-liveチェックリストに集約。(a)TODO集約 →
+  (b)実キー到着後に各E2Eを実Sandboxで通す → (c)フラグOFFのまま低リスク限定ライブで監査ログ/アラートを
+  観察 → (d)能力ごとに人間が明示的にgo-live判断、の順で構成。
+- 副次的に発見・修正したバグ: Alembicの`fileConfig`が既定で`disable_existing_loggers=True`のため、
+  同一プロセス内で`alembic upgrade`を呼ぶと`ebay_dropship.alerts`等の既存ロガーが無効化されてしまう
+  問題を`migrations/env.py`で修正(`disable_existing_loggers=False`)。
+
+## 過去のステータス: Phase 6(Check+Act: PDCAを閉じる)完了
 
 - `analytics/`: `summarize_listing_metrics`(フィクスチャ経由。実eBay Analytics API疎通は今回スコープ外、
   実キーSandbox E2Eゲートにまとめて実施)。成約率・ウォッチ率・返品率・サンプル充足・返品率乖離を計算。
@@ -94,8 +113,9 @@ pytest
 
 ## 開発フェーズ
 
-`PROMPT.md` 第9章参照。第0(本コミット)→第1(eBayアダプタ/Sandbox)→第2(データモデル/承認基盤)→
-第3(Plan)→第4(Do)→第5(受注/サプライヤー同期)→第6(Check/Act)→第7(ダッシュボード)の順に進める。
+`PROMPT.md` 第9章参照。第0(初期化)→第1(eBayアダプタ/Sandbox)→第2(データモデル/承認基盤)→
+第3(Plan)→第4(Do)→第5(受注/サプライヤー同期)→第6(Check/Act)→第7(ダッシュボード/運用)ですべて完了。
+本番投入(実キー・実publish・実自動発注)に進む前には、必ず `GO_LIVE.md` のチェックリストに従うこと。
 
 ## 最優先ルール
 

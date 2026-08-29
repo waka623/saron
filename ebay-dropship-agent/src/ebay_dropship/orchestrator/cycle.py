@@ -23,6 +23,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from ebay_dropship.alerts import Notifier, notify_for_proposal
 from ebay_dropship.approval import Proposal, ProposalType
 from ebay_dropship.store.repository import SqlProposalRepository
 
@@ -39,7 +40,10 @@ class CycleResult:
 
 
 def _run_tasks(
-    tasks: list[TaskFn], repository: SqlProposalRepository, errors: list[Exception]
+    tasks: list[TaskFn],
+    repository: SqlProposalRepository,
+    errors: list[Exception],
+    notifier: Notifier | None,
 ) -> tuple[list[Proposal], list[Proposal]]:
     enqueued: list[Proposal] = []
     skipped: list[Proposal] = []
@@ -52,7 +56,10 @@ def _run_tasks(
         if proposal.proposal_type is ProposalType.NONE:
             skipped.append(proposal)
             continue
-        enqueued.append(repository.enqueue(proposal))
+        saved = repository.enqueue(proposal)
+        if notifier is not None:
+            notify_for_proposal(saved, notifier)  # hold/withdrawなら「なぜ止まったか」をアラートする
+        enqueued.append(saved)
     return enqueued, skipped
 
 
@@ -61,11 +68,16 @@ def run_cycle(
     repository: SqlProposalRepository,
     plan_tasks: list[TaskFn] | None = None,
     act_tasks: list[TaskFn] | None = None,
+    notifier: Notifier | None = None,
 ) -> CycleResult:
-    """plan_tasks(research/listing相当)→act_tasks(pricing相当)の順に実行し、承認キューに積む。"""
+    """plan_tasks(research/listing相当)→act_tasks(pricing相当)の順に実行し、承認キューに積む。
+
+    notifier を渡すと、hold/withdraw で積まれた提案について `alerts.notify_for_proposal` が発火する
+    (在庫乖離・不採算を「なぜ止まったか」付きでアラートする)。
+    """
     errors: list[Exception] = []
-    plan_enqueued, plan_skipped = _run_tasks(plan_tasks or [], repository, errors)
-    act_enqueued, act_skipped = _run_tasks(act_tasks or [], repository, errors)
+    plan_enqueued, plan_skipped = _run_tasks(plan_tasks or [], repository, errors, notifier)
+    act_enqueued, act_skipped = _run_tasks(act_tasks or [], repository, errors, notifier)
     return CycleResult(
         plan_enqueued=plan_enqueued,
         plan_skipped=plan_skipped,

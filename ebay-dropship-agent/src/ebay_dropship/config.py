@@ -42,6 +42,12 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite:///./ebay_dropship.db"
 
+    # --- 承認Web UI(api/) ---
+    # "username:password" のカンマ区切り。未設定(空文字)なら誰も認証できない(fail-closed)。
+    approval_api_users: str = ""
+    approval_api_host: str = "127.0.0.1"  # 既定でlocalhostのみ。外部公開はリバースプロキシ+TLS必須
+    approval_api_port: int = 8000
+
     @property
     def excluded_categories_list(self) -> list[str]:
         return [c.strip() for c in self.excluded_categories.split(",") if c.strip()]
