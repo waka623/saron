@@ -330,6 +330,15 @@ def execute_purchase(
     return repository.get(proposal.id)
 
 
+class WithdrawNotImplementedError(Exception):
+    """F7: withdraw提案は承認ゲートを通過するが、実行するeBay API連携がまだ実装されていない。
+
+    承認済みのまま run_do から見えなくなる(サイレントに放置される)ことを防ぐため、
+    実行を試みる代わりにこの例外を run_do の結果へ明示的に積む。status は approved のまま
+    変更しない(実行していないため executed/failed のいずれにも倒さない)。
+    """
+
+
 def run_do(
     *,
     repository: SqlProposalRepository,
@@ -344,7 +353,9 @@ def run_do(
 
     1件の失敗が他の提案の処理を止めないよう、例外はここで捕捉して結果リストに含める
     (各提案自身の成否は repository に確定的に記録済みなので、ここで握りつぶしても実害はない)。
-    supplier/purchase_channel が未指定の場合、purchase 提案はスキップする(withdrawは未実装)。
+    supplier/purchase_channel が未指定の場合、purchase 提案はスキップする。
+    withdraw は実行するeBay API連携が未実装のため、承認済みでも実行はせず
+    `WithdrawNotImplementedError` を結果に積んで可視化する(F7、DECISIONS.md参照)。
     """
     results: list[Proposal | Exception] = []
     for proposal in repository.list_approved():
@@ -382,6 +393,11 @@ def run_do(
                         calls_remaining=calls_remaining,
                         dry_run=dry_run,
                     )
+                )
+            elif proposal.proposal_type is ProposalType.WITHDRAW:
+                raise WithdrawNotImplementedError(
+                    f"proposal {proposal.id} はwithdrawですが実行するeBay API連携が未実装のため、"
+                    "何も実行していません(承認済みのまま残ります。実装まではDECISIONS.md参照)。"
                 )
         except Exception as exc:  # noqa: BLE001 - バッチ全体を止めないための意図的な広い捕捉
             results.append(exc)

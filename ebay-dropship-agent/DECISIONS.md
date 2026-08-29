@@ -475,15 +475,94 @@ F3(HIGH)の修正のみに限定**し、F1/F2/F4〜F7は次タスクへの残課
 - 全体テスト: `179 passed`(F3クローズ時点の170 + 今回追加9件)。`ruff check`もクリーン。
 - 並行実行の回帰テスト(F3の2件+F4の2件、計4件)は5回連続実行で安定。
 
-## 次タスクへの残課題(今回も意図的に未着手)
+## LOW(F5/F6/F7)とテスト欠落の解消(2026-08-29、空き時間の仕上げ)
 
-adversarial security reviewで報告した残りのfindings。修正には別途ユーザーの承認が必要。
+本番ブロッカー(F3/F4)解消後、残っていたLOW findings(F5/F6/F7)と、境界値・並行実行系の
+テスト欠落を解消した。各件について再現/失敗テスト先行(red)→最小修正→green の順を守り、
+対象ファイル以外は変更していない。
 
-| ID | 深刻度 | 内容 | file:line(発見時点) |
-|---|---|---|---|
-| F5 | LOW | eBay APIの上流エラー本文(`response.text`)が`payload.failure_reason`としてDB保存され、認証済みAPIの`GET /proposals`から閲覧可能(トークン自体は含まれない) | `adapters/ebay/auth.py:73`、`adapters/ebay/client.py:122,162,175,181,188` |
-| F6 | LOW | 承認Web UIのBasic認証(`require_auth`)が未知usernameで`secrets.compare_digest`を短絡評価するタイミングサイドチャネル(username列挙の可能性) | `api/__init__.py:70` |
-| F7 | LOW | `WITHDRAW`は承認ゲートを通過するが`run_do`にexecutorが無く実行経路が存在しない(未実装、実害なし) | `orchestrator/do.py`(`run_do`) |
+### F5: eBay APIの上流エラー本文が`payload.failure_reason`としてDB保存され閲覧可能
 
-併せて、境界値(`estimated_profit==min_net_profit`等の厳密な閾値一致)を検証するテストが
-guardrails全体に不足している(「テスト欠落」としてレビューで指摘済み、F1/F2/F4の修正では対応していない)。
+- **回帰テスト**: `tests/test_repository_failure_reason_redaction.py`
+  - `test_mark_failed_redacts_bearer_token_in_reason`("Bearer <token>"を含む理由文字列。
+    修正前は生保存されておりred確認済み)
+  - `test_mark_failed_redacts_access_token_field_in_reason`(`"access_token": "<値>"`形式)
+  - `test_mark_failed_leaves_ordinary_reason_text_unchanged`(通常の理由文字列は無変更のまま保存されることの回帰防止)
+- **修正**: `src/ebay_dropship/store/repository.py`
+  - `_SECRET_LIKE_PATTERN`(Bearerトークン/`access_token`・`refresh_token`・`client_secret`の
+    キー値パターン)と`_redact_secret_like_values`を追加し、`mark_failed`が`payload.failure_reason`
+    へ保存する直前にこれを通す。`adapters/ebay/`側(上流エラー文字列を組み立てている箇所)は
+    無変更 ―― 保存直前の1箇所でサニタイズする方が、複数箇所に散らばったf-string全てを
+    個別に直すより保守しやすいと判断した。
+  - 既存の`test_store_repository.py`の完全一致アサーション(`"eBay API error"`等)は
+    秘密情報らしきパターンを含まないため無変更のまま green。
+
+### F6: 承認Web UIのBasic認証にタイミングサイドチャネル
+
+- **回帰テスト**: `tests/test_api_auth_timing.py`
+  - `test_compare_digest_is_also_called_for_unknown_username`(未知usernameでも
+    `secrets.compare_digest`が必ず1回呼ばれることを検証。修正前は短絡評価により0回でred確認済み)
+  - `test_compare_digest_is_called_for_known_username_with_wrong_password`(既知usernameとの対称性)
+  - `test_valid_credentials_still_authenticate`(正常系の回帰防止)
+  - wall-clockタイミングの直接計測はCI環境依存でflakyになるため、「常に同じ回数
+    `compare_digest`を呼ぶ」という構造的性質で検証した(呼ぶ/呼ばないの非対称性そのものが
+    タイミング差の原因であるため、これを閉じれば十分)。
+- **修正**: `src/ebay_dropship/api/__init__.py::require_auth`
+  - `expected_password = users.get(credentials.username, "")`(未知usernameでもダミー値を用意)
+  - `password_matches = secrets.compare_digest(...)`を先に必ず実行し、その後
+    `is_valid = credentials.username in users and password_matches`で判定する(username自体の
+    正誤で処理経路が分岐しないようにした)。既存の`test_api.py`(fail-closed・decided_by記録等)は
+    全件無変更のまま green。
+
+### F7: 承認済みwithdraw提案が`run_do`から不可視のまま放置される
+
+- **回帰テスト**: `tests/test_orchestrator_do_withdraw_visibility.py`
+  - `test_run_do_surfaces_approved_withdraw_as_not_implemented_instead_of_vanishing`
+    (修正前は`run_do`の結果が`[]`になり、承認済みwithdrawがどこにも現れないことを実行して確認済み。red)
+  - `test_run_do_still_processes_other_proposals_alongside_pending_withdraw`
+    (withdrawの可視化がpublish/price_changeの通常処理を壊さないことの回帰防止)
+- **修正**: `src/ebay_dropship/orchestrator/do.py`
+  - `WithdrawNotImplementedError`を追加し、`run_do`に`ProposalType.WITHDRAW`の分岐を追加。
+    実行(eBay側API呼び出し)は依然として実装せず、この例外を`results`に積んで可視化するのみ
+    (statusはapprovedのまま変更しない ―― 実行していないためexecuted/failedのいずれにも倒さない)。
+  - 実際のwithdraw実行機能の実装(新しいeBay API連携・実Sandbox検証)は行っていない。
+    これは意図的: 新しい外部I/Oを追加すると「実Sandbox E2E待ちのみ」という状態から後退するため、
+    今回は「承認済みのまま見えなくなる」という可視性の問題だけを閉じた。実装自体は
+    引き続き将来タスク(下記の残課題ではなく、機能未実装として区別する)。
+
+### 境界値・並行実行系のテスト欠落
+
+- **利益ガードの境界値**: `tests/test_guardrails_boundary_values.py`
+  - `test_profit_guard_exactly_at_target_allows`(ちょうど目標`min_net_profit`と同額 → 許可)
+  - `test_profit_guard_one_cent_below_target_denies`(下限直下・1セント下 → deny)
+  - `test_profit_guard_one_cent_above_target_allows`(1セント上、対称性確認)
+  - 併せて`check_rate_budget`(残数==必要数/1不足)・`check_supplier_stock`(在庫==要求数/1不足)・
+    `check_supplier_data_freshness`(経過時間==許容時間ちょうど/1秒超過)の境界値テストも追加。
+  - いずれも実装は変更していない(手動検証で既にoff-by-oneが無いことは確認済みだった)。
+    9件すべて追加時点で green ―― 既存の正しい実装にテストカバレッジを追いつかせただけ。
+- **並行実行系**: 追加のテストは無し。F3(`tests/test_orchestrator_purchase_concurrency.py`、
+  purchase、スレッド+プロセス)とF4(`tests/test_orchestrator_do_concurrency.py`、publish/
+  price_change、スレッド)で、副作用を持つ3つの実行系(publish/price_change/purchase)すべての
+  並行実行シナリオを既にカバー済みと判断し、この時点で「並行系のテスト欠落」は解消済みとした。
+
+### 検証結果
+
+- 全体テスト: `196 passed`(F1/F2/F4修正時点の179 + 今回追加17件)。`ruff check`もクリーン。
+- 並行実行系(F3 2件+F4 2件、計4件)は5回連続実行で安定(再確認済み)。
+
+## 残タスク: ゼロ(コード側は完了。残るのは実Sandbox E2Eのみ)
+
+adversarial security reviewで報告した7件(F1〜F7)はすべて対応済み(F1/F2/F4/F5/F6/F7を修正、
+F3は別途修正・クローズ済み)。境界値・並行実行系のテスト欠落も解消した。
+
+コード側でこれ以上着手すべき既知の項目は無い。残っているのは`GO_LIVE.md`のとおり
+**実Sandbox認証情報が届いてからでないと着手できないこと**だけである:
+
+- (a) OAuth・Inventory(publish/price_change)・Fulfillment(getOrders)・Analytics(get_rate_limits)の
+  実Sandbox疎通確認。
+- (b) 上記を通過した後の、フラグOFFのままの低リスク限定ライブ運用(監査ログ・アラート観察)。
+- (c) 能力ごと(publish自動実行/price_change自動実行/自動発注/API外部公開)の、人間による
+  明示的なgo-live判断。
+
+withdraw実行機能自体の実装(F7で可視化のみ行い、機能追加はしていない)も、新しいeBay API連携が
+必要になるため実質的に実Sandbox統合待ちの一部として扱う。

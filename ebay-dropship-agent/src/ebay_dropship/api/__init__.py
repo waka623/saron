@@ -66,8 +66,13 @@ def require_auth(
 ) -> str:
     """認証されたusernameを返す。これが唯一のdecided_by供給源(クライアントは指定できない)。"""
     users = _parse_users(settings.approval_api_users)
-    expected_password = users.get(credentials.username)
-    is_valid = expected_password is not None and secrets.compare_digest(credentials.password, expected_password)
+    # F6(adversarial security review, 2026-08-29): 未知usernameのときだけcompare_digestを
+    # 呼ばずに短絡評価すると、既知usernameとの応答時間差からusernameの存在を推測できる
+    # (タイミングサイドチャネル)。既知/未知いずれでも必ずcompare_digestを1回呼ぶことで、
+    # username自体の正誤で処理経路が変わらないようにする(ダミー値との比較は必ず失敗する)。
+    expected_password = users.get(credentials.username, "")
+    password_matches = secrets.compare_digest(credentials.password, expected_password)
+    is_valid = credentials.username in users and password_matches
     if not is_valid:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

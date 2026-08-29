@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -12,6 +13,19 @@ from sqlalchemy.orm import Session
 
 from ebay_dropship.approval import ApprovalQueue, Proposal, ProposalStatus
 from ebay_dropship.store.models import ProposalRecord
+
+# F5(adversarial security review, 2026-08-29): eBay APIの上流エラー本文(response.text)が
+# EbayApiError/EbayAuthError のメッセージにそのまま埋め込まれ、mark_failed経由で
+# payload.failure_reason としてDB保存され、認証済みAPIから閲覧可能になる。トークン等の
+# 秘密情報らしきパターンが将来紛れ込んでも保存前に伏せられるよう、汎用的なサニタイズを行う。
+_SECRET_LIKE_PATTERN = re.compile(
+    r"(?i)(bearer\s+[a-z0-9._~+/-]{8,}=*"
+    r"|(?:access_token|refresh_token|client_secret)[\"']?\s*[:=]\s*[\"']?[a-z0-9._~+/-]{6,}=*)"
+)
+
+
+def _redact_secret_like_values(text: str) -> str:
+    return _SECRET_LIKE_PATTERN.sub("[REDACTED]", text)
 
 
 class InvalidTransitionError(Exception):
@@ -127,7 +141,7 @@ class SqlProposalRepository(ApprovalQueue):
 
     def mark_failed(self, proposal_id: str, decided_by: str, reason: str) -> Proposal:
         record = self._transition(proposal_id, ProposalStatus.FAILED, decided_by)
-        record.payload = {**record.payload, "failure_reason": reason}
+        record.payload = {**record.payload, "failure_reason": _redact_secret_like_values(reason)}
         self._session.flush()
         return _to_domain(record)
 
