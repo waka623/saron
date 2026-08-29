@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     supplier_csv_path: str = "./data/supplier_feed.csv"
     supplier_api_base_url: str = ""
     supplier_api_key: str = ""
+    # サプライヤーデータ(在庫・原価・納期)の鮮度閾値。無在庫最大の事故(古いデータでの発注)を防ぐ。
+    supplier_data_max_age_minutes: int = 1440  # 24時間
+
+    # 実発注(自動)は実サプライヤー統合+明示的go-liveまでOFF固定。安易に変更しないこと(DECISIONS.md参照)。
+    enable_automated_supplier_purchase: bool = False
 
     # 金額・率は Decimal 固定(float禁止)。pydantic-settings は .env の文字列から Decimal へ直接変換する。
     target_margin_pct: Decimal = Decimal(20)

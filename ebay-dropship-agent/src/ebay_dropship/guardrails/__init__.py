@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from ebay_dropship.approval import WRITE_PROPOSAL_TYPES, ProposalType
@@ -125,6 +126,27 @@ def check_publish_payload_complete(payload: dict) -> GuardrailResult:
         return GuardrailResult.deny(
             f"publish実行直前の再検査で不備を検出: 不足キー={missing} 未入力item_specifics={empty_specifics}"
             "(deny by default)。"
+        )
+    return GuardrailResult.ok()
+
+
+def check_supplier_data_freshness(
+    as_of: datetime | None, max_age_minutes: int, now: datetime
+) -> GuardrailResult:
+    """サプライヤーデータ(在庫・原価・納期)の鮮度を検査する。
+
+    無在庫ドロップシッピングの最悪の事故は「注文が入ったのに在庫が無い(古いデータで発注した)」こと。
+    as_of が無い、または許容時間を超えて古い場合は deny by default で発注させない。
+    """
+    if as_of is None:
+        return GuardrailResult.deny(
+            "サプライヤーデータの取得時刻(as_of)が不明なため deny(deny by default)。"
+        )
+    age = now - as_of
+    if age > timedelta(minutes=max_age_minutes):
+        return GuardrailResult.deny(
+            f"サプライヤーデータが古すぎます(as_of={as_of.isoformat()}、経過={age})。"
+            f"許容{max_age_minutes}分を超過(deny by default: 陳腐化データでの発注を防ぐ)。"
         )
     return GuardrailResult.ok()
 

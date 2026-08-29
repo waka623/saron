@@ -1,5 +1,6 @@
-"""guardrails の実装テスト(Phase 2)。金額は Decimal 固定(float禁止)。"""
+"""guardrails の実装テスト(Phase 2/5)。金額は Decimal 固定(float禁止)。"""
 
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -71,4 +72,23 @@ def test_supplier_stock_holds_when_insufficient():
 
 def test_supplier_stock_allows_when_sufficient():
     result = guardrails.check_supplier_stock(available_quantity=5, requested_quantity=1)
+    assert result.passed is True
+
+
+def test_supplier_data_freshness_denies_when_as_of_missing():
+    result = guardrails.check_supplier_data_freshness(None, 1440, datetime.now(UTC))
+    assert result.passed is False
+
+
+def test_supplier_data_freshness_denies_when_too_old():
+    now = datetime.now(UTC)
+    as_of = now - timedelta(minutes=1441)  # 24時間+1分 前
+    result = guardrails.check_supplier_data_freshness(as_of, 1440, now)
+    assert result.passed is False
+
+
+def test_supplier_data_freshness_allows_when_within_threshold():
+    now = datetime.now(UTC)
+    as_of = now - timedelta(minutes=10)
+    result = guardrails.check_supplier_data_freshness(as_of, 1440, now)
     assert result.passed is True

@@ -9,6 +9,7 @@ guardrails を通らずに `executor` を呼び出す経路を他に作らない
 from __future__ import annotations
 
 from collections.abc import Callable
+from decimal import Decimal
 
 from ebay_dropship.approval import Proposal, ProposalStatus, ProposalType
 from ebay_dropship.config import Settings
@@ -43,11 +44,16 @@ def execute_side_effect(
     available_quantity: int | None = None,
     requested_quantity: int | None = None,
     source_description: str = "",
+    current_profit_override: Decimal | None = None,
 ) -> Proposal:
     """proposal を承認済みかつ全guardrailを満たした場合にのみ executor(proposal) を呼ぶ。
 
     deny by default: いずれかの guardrail が deny、または判定に必要な情報が欠けている場合は
     GuardrailDenied を送出し、executor は一切呼ばれない。
+
+    `current_profit_override`: purchase等、実行直前に外部(サプライヤー)から取得し直した
+    最新原価で純利益を再計算した場合、承認時点で保存された `proposal.estimated_profit` の
+    代わりにこの値で利益ガードを再検査する(呼び出し側=orchestrator/do.pyがこの再計算を行う)。
     """
     if proposal.status != ProposalStatus.APPROVED:
         raise ComplianceError(
@@ -67,7 +73,10 @@ def execute_side_effect(
     results.append(check_rate_budget(calls_remaining, calls_needed))
 
     if proposal.proposal_type in PROFIT_GATED_TYPES:
-        results.append(check_profit_guard(proposal.estimated_profit, settings.min_net_profit))
+        profit_to_check = (
+            current_profit_override if current_profit_override is not None else proposal.estimated_profit
+        )
+        results.append(check_profit_guard(profit_to_check, settings.min_net_profit))
 
     if proposal.proposal_type is ProposalType.PUBLISH:
         results.append(check_publish_payload_complete(proposal.payload))

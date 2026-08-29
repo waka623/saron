@@ -169,3 +169,62 @@
   APScheduler / pytest を採用。変更の必要が出たらここに追記する。
 - **本コミットのスコープ:** ディレクトリ雛形・空インターフェース(ABC/pydanticモデル)・guardrails の TODO とスケルテストのみ。
   実際のロジック(guardrails の判定、DB、API 呼び出し)は Phase 1 以降で実装する。
+
+## Phase 5
+
+- **SupplierAdapter(CSV)の具体実装 + データ鮮度必須化:** `supplier.SupplierStock` に `as_of`
+  (データがいつ時点のものか)を必須フィールドとして追加した。`CsvSupplierAdapter.sync()` は各行を
+  独立してパースし、不正行(必須列欠落・cost/quantity/lead_time_daysの型不正・負数・as_ofのISO形式不正)は
+  `CsvRowError` として隔離してsync全体を落とさない(`tests/test_supplier_csv_adapter.py`)。
+  内部モデル(`SupplierStock`)は供給元非依存のままで、`supplier/api_adapter.py`(未実装スタブ、契約は同じ)へ
+  差し替え可能な設計を維持している。
+  新設の `guardrails.check_supplier_data_freshness`(deny by default: `as_of` が無い、または
+  `SUPPLIER_DATA_MAX_AGE_MINUTES`(既定24時間)を超えて古い場合はdeny)を `orders.evaluate_purchase` と
+  `orchestrator/do.py::execute_purchase` の両方(判断時・実行時の両方)で使用する。
+- **Fulfillment APIはフェイクで検証(実キー未着):** `EbayClient.get_orders`(Fulfillment API
+  `getOrders`、読み取り専用)を実装し、`tests/fakes/ebay_fulfillment_fake.py::FakeFulfillmentBackend` +
+  `httpx.MockTransport` でSandbox疎通をモック(Phase1/3と同じ方針)。
+  要求どおり5つの乖離モードをすべて再現・検証した(このフェーズの主目的=乖離検知→hold):
+  1. **在庫消失** — `supplier.fetch_stock` がKeyErrorまたは数量0を返す → hold
+     (`test_holds_when_stock_lost` / `test_holds_when_quantity_insufficient`)。
+  2. **原価上昇(margin超え)** — 受注時想定原価ではなく現在原価で純利益を再計算し、
+     利益ガード割れならhold(`test_holds_when_cost_increased_beyond_margin`)。
+  3. **発送不可地域** — 除外国コード(輸出規制想定)なら発注せずhold(`test_holds_for_non_shippable_destination`)。
+  4. **部分成功・重複受注** — `orders.ingest_orders` が、Fulfillment APIレスポンス中の不正レコードを
+     隔離しつつ(部分成功)、同じ`order_id`が2回現れた場合は2件目以降を`duplicate_order_ids`に振り分けて
+     二重処理しない(`test_ingest_orders_isolates_malformed_records_without_failing` /
+     `test_ingest_orders_deduplicates_repeated_order_id` /
+     `tests/test_ebay_fulfillment.py::test_get_orders_mocked_sandbox_connectivity_and_ingest_isolates_duplicates_and_bad_rows`)。
+  5. **同期ラグ** — サプライヤーデータの`as_of`が閾値より古ければhold(上記の鮮度ガードを再利用。
+     `test_holds_when_supplier_data_is_stale`)。
+  加えて納期超過(サプライヤー納期が約束納期に間に合わない)もhold対象にした(`test_holds_when_lead_time_exceeds_due_date`)。
+- **受注処理(orders/)は判断のみルールベース:** `evaluate_purchase` はLLMを使わず、上記5+1の条件を
+  順に確認し、すべて通過した場合のみ `proposal_type=purchase` を返す(AGENT_PROMPTS.md 4章どおり
+  `purchase | hold` のみ)。
+- **purchase の実行(orchestrator/do.py::execute_purchase)は要求どおり厳重にゲーティングした:**
+  - **(a) 実発注は常にフェイク/手動チャネルのみに接続。** `config.Settings.enable_automated_supplier_purchase`
+    は既定 `False` で固定。**TODO(本番投入前の必須ゲート・未消化):** 実サプライヤーの自動発注APIとの統合、
+    および人間による明示的なgo-live判断が完了するまで、このフラグをTrueにしても対応する実装（自動発注チャネル）
+    はコードベースに存在しない。誰かが将来 `AutomatedSupplierPurchaseChannel` のような実装を追加する際は、
+    必ずこのフラグでゲートし、実キー・実サプライヤー契約が整うまでデフォルトを変更しないこと。
+  - **(b) 発注パケット生成方式。** `orders/purchase_channel.py::ManualOrderPurchaseChannel`(既定実装)は
+    どこにも自動送信せず、`PurchaseOrderPacket`(何を・どこから・いくらで・送り先)を記録するだけ。
+    実際の発注は人間が手動で行う想定。将来、真の自動発注APIを持つサプライヤーと統合する場合は
+    `PurchaseChannel` インターフェースの新しい実装に差し替えるだけでよく、`execute_purchase` 側の変更は不要。
+  - **(c) 冪等性。** 同じ`order_id`の`PurchaseOrderPacket`を2回`submit_purchase`すると2回目は
+    `status="duplicate"`を返す(`test_purchase_channel_itself_treats_duplicate_submission_idempotently`)。
+    加えて、`repository.update_payload`で`purchase_reference_id`を記録済みなら、中断からの再実行時に
+    `submit_purchase`自体を一切呼ばずに完了扱いにする(`test_purchase_retry_after_interrupted_attempt_does_not_resubmit`)。
+    さらに上位のガードとして、状態機械上EXECUTED/FAILEDは終端状態のため同一proposalの二重実行は構造的に不可能
+    (Phase4と同じ保証)。
+  - **(d) 実行時再検査(deny by default、受注時点の数字を信用しない)。** `execute_purchase` は実行の瞬間に
+    `supplier.fetch_stock`を再度呼び、(1) データ鮮度、(2) 現在原価での純利益再計算、(3) 現在在庫での数量充足、
+    をすべて再確認する。承認時点でOKだった提案でも、実行直前にこれらが崩れていれば
+    `guardrails.gateway.execute_side_effect`に発注させず`GuardrailDenied`で止める
+    (`test_purchase_blocked_when_stock_lost_at_execution_time` /
+    `test_purchase_blocked_when_current_cost_exceeds_margin_at_execution_time` /
+    `test_purchase_blocked_when_supplier_data_stale_at_execution_time` /
+    `test_purchase_blocked_when_stock_insufficient_at_execution_time`)。
+    現在原価での利益再計算を通すため、`guardrails.gateway.execute_side_effect` に
+    `current_profit_override` パラメータを追加した(承認時点の`proposal.estimated_profit`ではなく、
+    実行直前に計算した値でprofit_guardを検査できるようにする拡張)。

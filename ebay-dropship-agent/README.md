@@ -12,7 +12,22 @@ eBay 上で **卸直送型の無在庫ドロップシッピング** を、承認
 3. `compliance.md` — eBay の無在庫・ドロップシッピング規約とレート制限
 4. `DECISIONS.md` — これまでの設計判断の記録
 
-## 現在のステータス: Phase 4(Do: 承認→出品/価格改定)完了
+## 現在のステータス: Phase 5(受注+サプライヤー同期)完了
+
+- `supplier/csv_adapter.py`: `SupplierStock` に `as_of`(データ鮮度)を必須化。不正なCSV行はsyncを
+  落とさず隔離。`guardrails.check_supplier_data_freshness`(deny by default)で古いデータでの発注を防ぐ。
+- `EbayClient.get_orders`(Fulfillment API、読み取り専用)を実装。`orders.ingest_orders` が不正レコードの
+  隔離と重複`order_id`の検知を行う。
+- `orders.evaluate_purchase`: ルールベースのみで在庫消失・原価上昇(margin超え)・発送不可地域・
+  同期ラグ・納期超過を検知して`hold`(すべて実データに近いフェイクで再現・検証済み)。
+- `orchestrator/do.py::execute_purchase`: 発注実行は既定で `ManualOrderPurchaseChannel`
+  (発注パケットの記録のみ、実送信なし)に対してのみ行う。実自動発注は
+  `enable_automated_supplier_purchase`(既定False固定)でゲート。冪等性(同一order_id再送は
+  duplicate扱い)・実行時再検査(発注の瞬間に現在原価・在庫・鮮度を再確認)を実装。
+- **重要(TODO・未消化):** 実サプライヤーとの自動発注API統合、および明示的なgo-live判断が済むまで
+  自動発注は有効化しない。`DECISIONS.md` の Phase 5 節参照。
+
+## 過去のステータス: Phase 4(Do: 承認→出品/価格改定)完了
 
 - `orchestrator/do.py`: 承認済み(APPROVED)の publish/price_change を実行する `execute_publish` /
   `execute_price_change` / `run_do`。`guardrails.gateway.execute_side_effect` の executor として

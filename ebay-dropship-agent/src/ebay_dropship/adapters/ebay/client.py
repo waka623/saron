@@ -3,7 +3,7 @@
 Phase 1: OAuth・レート制限クライアント・読み取り系の疎通確認(get_rate_limits)。
 Phase 3: Browse(検索・読み取り専用)。
 Phase 4: Inventory の書き込み(inventory_item/offer/publish/update_offer)。
-Fulfillment(受注取得)は Phase 5 で実装する。
+Phase 5: Fulfillment(受注取得、読み取り専用)。
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ RATE_LIMIT_PATH = "/developer/analytics/v1_beta/rate_limit/"
 BROWSE_SEARCH_PATH = "/buy/browse/v1/item_summary/search"
 INVENTORY_ITEM_PATH = "/sell/inventory/v1/inventory_item"
 OFFER_PATH = "/sell/inventory/v1/offer"
+FULFILLMENT_ORDER_PATH = "/sell/fulfillment/v1/order"
 
 # eBay Inventory API のエラーコード。offer が既にSKUに紐づいて存在する場合(重複防止・冪等性のため参照)。
 DUPLICATE_OFFER_ERROR_ID = 25002
@@ -189,4 +190,9 @@ class EbayClient:
 
     # --- Fulfillment (Phase 5) ---
     def get_orders(self, since: str | None = None) -> list[dict]:
-        raise NotImplementedError("Phase 5 で実装")
+        """Fulfillment API の getOrders(読み取り専用)。orders/ingest_orders で不正行・重複を隔離する。"""
+        params: dict = {}
+        if since:
+            params["filter"] = f"creationdate:[{since}..]"
+        data = self._get(FULFILLMENT_ORDER_PATH, params=params)
+        return data.get("orders", [])

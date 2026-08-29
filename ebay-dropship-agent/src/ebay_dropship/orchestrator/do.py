@@ -1,18 +1,21 @@
-"""Phase 4: 承認済み proposal の実行(Do)。
+"""Phase 4/5: 承認済み proposal の実行(Do)。
 
 このモジュールが `guardrails.gateway.execute_side_effect` の executor として実際に
 eBay Sell API(Inventory)の書き込みメソッドを呼ぶ、唯一の場所である
 (`tests/test_guardrail_gateway.py::test_ebay_write_methods_are_only_called_through_guardrail_gateway`
-の許可リストに本ファイルが含まれる)。
+の許可リストに本ファイルが含まれる)。purchaseの発注実行(`orders/purchase_channel.py`)も同様にここが
+唯一の接続点。
 
 スコープの切り分け: このモジュールは「承認済みproposalを実行するだけ」。
-どの価格にするか・出品すべきかの判断は research/listing/pricing の仕事であり、ここでは判断しない。
+どの価格にするか・出品すべきか・発注してよいかの判断は research/listing/pricing/orders の仕事であり、
+ここでは判断しない(purchaseの実行時再検査=現在原価での利益再計算・在庫再確認は例外。
+実行の瞬間に外部の最新状態を問い合わせる必要があるためここで行う。詳細は execute_purchase docstring)。
 
 冪等性・原子性の設計:
 - inventory_item は PUT(仕様上べき等)。offer は POST だが、既存offerがあれば
   EbayOfferAlreadyExistsError を捕捉して既存IDを再利用する(重複出品を作らない)。
 - 各ステップが成功するたびに repository.update_payload で proposal.payload に
-  ebay_item_id / ebay_offer_id / ebay_listing_id を記録してから次のステップに進む。
+  ebay_item_id / ebay_offer_id / ebay_listing_id / purchase_reference_id を記録してから次のステップに進む。
   途中で失敗・中断しても、次回の実行は payload に記録済みのIDを見て完了済みステップを飛ばす。
 - 最終的に全ステップが成功したときだけ repository.mark_executed を呼ぶ。
   途中で失敗したら repository.mark_failed で理由を記録し、例外を再送出する
@@ -24,13 +27,20 @@ eBay Sell API(Inventory)の書き込みメソッドを呼ぶ、唯一の場所�
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 from ebay_dropship.adapters.ebay import EbayApiError, EbayClient, EbayOfferAlreadyExistsError
-from ebay_dropship.approval import Proposal, ProposalType
+from ebay_dropship.approval import Proposal, ProposalStatus, ProposalType
 from ebay_dropship.config import Settings
-from ebay_dropship.guardrails.gateway import execute_side_effect
+from ebay_dropship.guardrails import ComplianceError, GuardrailResult, check_supplier_data_freshness
+from ebay_dropship.guardrails.gateway import GuardrailDenied, execute_side_effect
+from ebay_dropship.orders import DEFAULT_EBAY_FEE_PCT
+from ebay_dropship.orders.purchase_channel import PurchaseChannel, PurchaseOrderPacket
+from ebay_dropship.pricing import calculate_net_profit
 from ebay_dropship.store.repository import SqlProposalRepository
+from ebay_dropship.supplier import SupplierAdapter
 
 
 def _inventory_item_payload(payload: Mapping[str, Any]) -> dict:
@@ -180,6 +190,114 @@ def execute_price_change(
     return repository.get(proposal.id)
 
 
+def execute_purchase(
+    proposal: Proposal,
+    *,
+    repository: SqlProposalRepository,
+    supplier: SupplierAdapter,
+    purchase_channel: PurchaseChannel,
+    settings: Settings,
+    calls_remaining: int,
+    fee_pct: Decimal = DEFAULT_EBAY_FEE_PCT,
+    shipping_cost: Decimal = Decimal(0),
+    dry_run: bool = False,
+    now: datetime | None = None,
+) -> Proposal:
+    """承認済み purchase 提案を実行する。
+
+    実行時再検査(deny by default、承認時点の数字を信用しない):
+    発注の瞬間にサプライヤーへ再度問い合わせ、(1) データが陳腐化していないか、(2) 現在原価で
+    利益を再計算してガードを満たすか、(3) 現在の在庫が要求数量を満たすか、を確認する。
+    いずれかに問題があれば発注(purchase_channel.submit_purchase)を一切呼ばずに失敗として扱う。
+
+    (a) 実発注は `settings.enable_automated_supplier_purchase` が False の間、常に
+        `purchase_channel`(既定は ManualOrderPurchaseChannel = 発注パケットの記録のみ、実送信なし)
+        に対してのみ行う。実サプライヤーへの自動発注APIはこのコードベースに存在しない
+        (DECISIONS.md の Phase 5 節を参照。フラグをTrueにしても実装が無いため何も起きない)。
+    """
+    if proposal.proposal_type is not ProposalType.PURCHASE:
+        raise ValueError(f"execute_purchase は purchase 提案専用です(proposal_type={proposal.proposal_type})")
+
+    if proposal.status != ProposalStatus.APPROVED:
+        raise ComplianceError(
+            f"承認されていない提案(status={proposal.status})は実行できません。承認ワークフローを経由してください。"
+        )
+
+    now = now or datetime.now(UTC)
+    sku = proposal.payload["sku"]
+    requested_quantity = proposal.payload.get("quantity", 1)
+
+    try:
+        stock = supplier.fetch_stock(sku)
+    except KeyError as exc:
+        reason = f"実行時再検査: サプライヤーにSKU={sku}が見つからず在庫消失の疑い。"
+        repository.mark_failed(proposal.id, decided_by="orchestrator", reason=reason)
+        raise GuardrailDenied([GuardrailResult.deny(reason)]) from exc
+
+    freshness = check_supplier_data_freshness(stock.as_of, settings.supplier_data_max_age_minutes, now)
+    if not freshness.passed:
+        reason = f"実行時再検査(同期ラグ): {freshness.reason}"
+        repository.mark_failed(proposal.id, decided_by="orchestrator", reason=reason)
+        raise GuardrailDenied([freshness])
+
+    current_profit = calculate_net_profit(
+        Decimal(str(proposal.payload["customer_paid"])), stock.cost, fee_pct, shipping_cost
+    )
+
+    def executor(p: Proposal) -> None:
+        payload = dict(p.payload)
+
+        if dry_run:
+            payload["dry_run_preview"] = {
+                "purchase_packet": {
+                    "order_id": payload["order_id"],
+                    "sku": sku,
+                    "quantity": requested_quantity,
+                    "unit_cost": str(stock.cost),
+                    "ship_to_country": payload.get("ship_to_country"),
+                }
+            }
+            repository.update_payload(p.id, payload)
+            return
+
+        if payload.get("purchase_reference_id"):
+            # 中断からの再開: 既に発注パケットを記録済み(冪等。二重発注しない)。
+            repository.mark_executed(p.id, decided_by="orchestrator")
+            return
+
+        packet = PurchaseOrderPacket(
+            order_id=payload["order_id"],
+            sku=sku,
+            quantity=requested_quantity,
+            unit_cost=stock.cost,
+            supplier_name="csv_supplier",
+            ship_to_country=payload.get("ship_to_country", ""),
+        )
+        result = purchase_channel.submit_purchase(packet)
+        if result.status == "failed":
+            repository.mark_failed(p.id, decided_by="orchestrator", reason=f"発注記録失敗: {result.detail}")
+            raise RuntimeError(result.detail)
+
+        payload["purchase_reference_id"] = result.reference_id
+        payload["purchase_status"] = result.status
+        payload["supplier_cost"] = stock.cost
+        payload["recalculated_profit"] = current_profit
+        repository.update_payload(p.id, payload)
+        repository.mark_executed(p.id, decided_by="orchestrator")
+
+    execute_side_effect(
+        proposal,
+        executor,
+        settings=settings,
+        calls_remaining=calls_remaining,
+        calls_needed=1,
+        available_quantity=stock.quantity,
+        requested_quantity=requested_quantity,
+        current_profit_override=current_profit,
+    )
+    return repository.get(proposal.id)
+
+
 def run_do(
     *,
     repository: SqlProposalRepository,
@@ -187,12 +305,14 @@ def run_do(
     settings: Settings,
     calls_remaining: int,
     dry_run: bool = False,
+    supplier: SupplierAdapter | None = None,
+    purchase_channel: PurchaseChannel | None = None,
 ) -> list[Proposal | Exception]:
-    """承認済み(APPROVED)の publish/price_change をすべて実行する。
+    """承認済み(APPROVED)の publish/price_change/purchase をすべて実行する。
 
     1件の失敗が他の提案の処理を止めないよう、例外はここで捕捉して結果リストに含める
     (各提案自身の成否は repository に確定的に記録済みなので、ここで握りつぶしても実害はない)。
-    withdraw/purchase は Phase 5 のスコープのため、ここでは処理しない。
+    supplier/purchase_channel が未指定の場合、purchase 提案はスキップする(withdrawは未実装)。
     """
     results: list[Proposal | Exception] = []
     for proposal in repository.list_approved():
@@ -214,6 +334,18 @@ def run_do(
                         proposal,
                         repository=repository,
                         ebay_client=ebay_client,
+                        settings=settings,
+                        calls_remaining=calls_remaining,
+                        dry_run=dry_run,
+                    )
+                )
+            elif proposal.proposal_type is ProposalType.PURCHASE and supplier and purchase_channel:
+                results.append(
+                    execute_purchase(
+                        proposal,
+                        repository=repository,
+                        supplier=supplier,
+                        purchase_channel=purchase_channel,
                         settings=settings,
                         calls_remaining=calls_remaining,
                         dry_run=dry_run,

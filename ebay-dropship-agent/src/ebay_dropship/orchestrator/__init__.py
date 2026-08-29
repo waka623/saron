@@ -9,7 +9,9 @@ from ebay_dropship.adapters.ebay import EbayClient
 from ebay_dropship.approval import Proposal
 from ebay_dropship.config import Settings
 from ebay_dropship.orchestrator.do import run_do as _run_do
+from ebay_dropship.orders.purchase_channel import PurchaseChannel
 from ebay_dropship.store.repository import SqlProposalRepository
+from ebay_dropship.supplier import SupplierAdapter
 
 
 class PdcaPhase(StrEnum):
@@ -31,14 +33,18 @@ class Orchestrator:
         settings: Settings,
         calls_remaining: int,
         dry_run: bool = False,
+        supplier: SupplierAdapter | None = None,
+        purchase_channel: PurchaseChannel | None = None,
     ) -> list[Proposal | Exception]:
-        """承認済み(APPROVED)の publish/price_change を実行する。実体は orchestrator/do.py。"""
+        """承認済み(APPROVED)の publish/price_change/purchase を実行する。実体は orchestrator/do.py。"""
         return _run_do(
             repository=repository,
             ebay_client=ebay_client,
             settings=settings,
             calls_remaining=calls_remaining,
             dry_run=dry_run,
+            supplier=supplier,
+            purchase_channel=purchase_channel,
         )
 
     def run_check(self) -> None:
