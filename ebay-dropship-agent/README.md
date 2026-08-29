@@ -12,7 +12,21 @@ eBay 上で **卸直送型の無在庫ドロップシッピング** を、承認
 3. `compliance.md` — eBay の無在庫・ドロップシッピング規約とレート制限
 4. `DECISIONS.md` — これまでの設計判断の記録
 
-## 現在のステータス: Phase 5(受注+サプライヤー同期)完了
+## 現在のステータス: Phase 6(Check+Act: PDCAを閉じる)完了
+
+- `analytics/`: `summarize_listing_metrics`(フィクスチャ経由。実eBay Analytics API疎通は今回スコープ外、
+  実キーSandbox E2Eゲートにまとめて実施)。成約率・ウォッチ率・返品率・サンプル充足・返品率乖離を計算。
+- `pricing.evaluate_next_action`: AGENT_PROMPTS.mdの例を検算のうえ、数値の不一致を訂正して採用
+  (詳細はDECISIONS.md参照)。price_change(クランプあり/なし)・withdraw・hold(在庫消失/データ陳腐化)・
+  none(据え置き/サンプル不足/クールダウン/重複排除)をすべてルールベースで判断。
+  クールダウン・最小サンプル・重複排除のフィードバック安定化ガードを実装。
+- `orchestrator/cycle.py::run_cycle`: Plan→Actを1回回す直接呼べる関数(タイマー待ち不要でテスト可能)。
+  `proposal_type=none`は承認キューに積まない。**publish/price_change/purchaseの実行は一切行わない**
+  (承認キューに積むところまで。ソース走査で静的に保証)。
+  `orchestrator/scheduler.py::CycleScheduler`がsingle-flightな薄いトリガー層(APScheduler登録は
+  Phase 7予定のAPIアプリ起動時に行う)。`ebay-dropship cycle run-once`で手動実行可能。
+
+## 過去のステータス: Phase 5(受注+サプライヤー同期)完了
 
 - `supplier/csv_adapter.py`: `SupplierStock` に `as_of`(データ鮮度)を必須化。不正なCSV行はsyncを
   落とさず隔離。`guardrails.check_supplier_data_freshness`(deny by default)で古いデータでの発注を防ぐ。

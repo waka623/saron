@@ -80,3 +80,14 @@ def test_approve_then_approve_again_fails_invalid_transition(cli_db):
     result = runner.invoke(cli, ["proposals", "approve", proposal_id, "--by", "alice"])
 
     assert result.exit_code != 0
+
+
+def test_cycle_run_once_reports_zero_when_no_tasks_wired(cli_db):
+    """現時点ではPlan/Actの自動タスク列挙は未統合のため、空実行でsingle-flight機構の疎通のみ確認する。"""
+    runner = CliRunner()
+
+    result = runner.invoke(cli, ["cycle", "run-once"])
+
+    assert result.exit_code == 0
+    assert "plan: enqueued=0 skipped=0" in result.output
+    assert "act: enqueued=0 skipped=0" in result.output

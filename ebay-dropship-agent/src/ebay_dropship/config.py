@@ -35,6 +35,11 @@ class Settings(BaseSettings):
 
     pdca_cycle: str = "daily"
 
+    # --- pricing(Act)のフィードバック安定化ガード ---
+    pricing_cooldown_days: int = 7  # 同一listingへの変更提案は直近この日数以内は再提案しない
+    pricing_min_sample_views: int = 30  # これ未満のview数ではactionせずnone(データが薄いうちは動かさない)
+    pricing_discount_step_pct: Decimal = Decimal(10)  # 値下げ検討時の初手の下げ幅(%)
+
     database_url: str = "sqlite:///./ebay_dropship.db"
 
     @property

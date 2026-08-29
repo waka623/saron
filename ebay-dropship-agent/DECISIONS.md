@@ -228,3 +228,60 @@
     現在原価での利益再計算を通すため、`guardrails.gateway.execute_side_effect` に
     `current_profit_override` パラメータを追加した(承認時点の`proposal.estimated_profit`ではなく、
     実行直前に計算した値でprofit_guardを検査できるようにする拡張)。
+
+## Phase 6
+
+- **analytics/(Check)はフィクスチャの延長で実装。実eBay Analytics API疎通は今回のスコープ外。**
+  `MetricsProvider`抽象インターフェース + `FixtureMetricsProvider`(既定実装)で `KpiSummary`
+  (成約率・ウォッチ率・返品率・サンプル充足・返品率乖離フラグ)を計算する。research/market_data.pyや
+  supplier/csv_adapter.pyと同じ「インターフェース越しに実装差し替え」方針を踏襲しており、将来
+  `EbayAnalyticsMetricsProvider`を追加する際もこの契約に合わせるだけでよい。
+  **TODO(本番投入前の必須ゲート・未消化):** 実 Analytics API への実疎通確認は、Phase 1/4/5で積み上げてきた
+  「実Sandboxキーでのエンドツーエンド検証」ゲート(DECISIONS.md Phase 4節)に統合する。実キー到着後、
+  Inventory/Fulfillmentの実疎通と合わせて一度に確認し、個別に先行実施はしない。
+  エッジケース(売上ゼロ・サンプル不足・view自体が0・返品率乖離あり/なし)をすべてテストで検証済み
+  (`tests/test_analytics.py`)。
+- **pricing.evaluate_next_action(Act)はAGENT_PROMPTS.mdの例を検算のうえ採用、数値を訂正して固定:**
+  元の例(listing_id=A123, price=$40, cost=$22, fee=13%, shipping=$6)の「$38へ値下げ、純利益$4.66
+  (12%)」という記述を、同じ前提(fee_pct=13%、shipping=$6)で再計算したところ数値が一致しなかった
+  (`$38`での正しい純利益は`38-22-38*0.13-6=$5.06`であり、`$4.66`にはならない。$36 案の`$3.32`は
+  一致し、利益ガード割れである点も一致)。**ユーザー指示どおり、採用前の検算で不一致を検出したため、
+  そのままの数値では固定せず、同じ判断ロジック(まず10%引きの$36を試し、利益ガード割れのため、
+  純利益がちょうど最低ライン$5になる価格までクランプする)を再計算し直した数値
+  ($37.94・純利益$5.0078)をゴールデンとして採用した。** 判断の構造(値下げ→ガード割れ→クランプ)は
+  元の例と同一。詳細な検算過程は `tests/test_pricing.py` のモジュールdocstringに記録した。
+  数値・判断(proposal_type/proposed_price/estimated_profit)は完全一致、自由文(rationale/action_detail)
+  は性質検証にとどめている。要求どおりhard caseをすべて含めた: price_change(クランプあり/なし)・
+  withdraw(不採算・値下げ余地なし)・hold(在庫消失・データ陳腐化。supplier併用)・
+  none(据え置き/サンプル不足/クールダウン中/重複排除)。
+- **フィードバック安定化ガード(ループを閉じるため必須)を`pricing.evaluate_next_action`に実装:**
+  - クールダウン/ヒステリシス: `settings.pricing_cooldown_days`(既定7日)以内に価格変更済みの
+    listingは`none`(`test_none_when_within_cooldown_period` / `test_price_change_proposed_after_cooldown_period_elapsed`
+    で境界の両側を確認)。
+  - 最小サンプル: `settings.pricing_min_sample_views`(既定30)未満のview数では`none`
+    (`test_none_when_sample_insufficient`)。
+  - 重複排除: 呼び出し側が`ListingSnapshot.has_pending_proposal`で「既に承認待ちがある」ことを伝えると
+    `none`になり、積み増さない(`test_none_when_pending_proposal_already_exists`)。
+  - 加えて `orchestrator/cycle.py::run_cycle` 自体も `proposal_type=none` の結果を承認キューに
+    積まない設計にしており(下記)、二重に重複防止が効く。
+- **orchestrator.run_cycle: サイクルのロジックとトリガー(スケジューラ)を分離した。**
+  - `orchestrator/cycle.py::run_cycle` は直接呼べる純粋関数で、`plan_tasks`/`act_tasks`
+    (research/listing/pricingのevaluate_*呼び出しを包んだcallableのリスト)を受け取り、
+    `proposal_type=none`以外を`repository.enqueue`する。テストはタイマー待ちでなく直接呼び出しで行った
+    (`tests/test_orchestrator_cycle.py`)。
+  - `orchestrator/scheduler.py::CycleScheduler` は`run_cycle`を叩くだけの薄いトリガーで、
+    `threading.Lock`によるsingle-flight(前サイクル未完なら`tick()`が即座に`None`を返してスキップ)を
+    実装(`tests/test_orchestrator_scheduler.py`、`threading.Event`で実際に並行呼び出しを再現して検証)。
+    実際のAPScheduler登録(`scheduler.add_job(cycle_scheduler.tick, "interval", hours=24)`等)は、
+    将来 `api/`(Phase 7予定のFastAPIアプリ)の起動処理で行う想定。今回は登録先となる薄いトリガー
+    (`CycleScheduler`)とその動作保証(single-flight)までを実装した。
+  - `ebay-dropship cycle run-once` CLIコマンドで手動「今すぐ1回実行」を提供(`tests/test_cli.py`)。
+  - **最重要の境界を維持:** `run_cycle`は承認キューに積むところまでで、`publish`/`price_change`/
+    `purchase`の実行は一切行わない。`orchestrator/cycle.py`が`orchestrator/do.py`をimportすら
+    していないことを`tests/test_orchestrator_cycle.py::test_cycle_module_never_references_do_phase_execution`
+    でソース走査により静的に検査している(Phase2/4の静的バイパス検査と同じ方針)。
+  - **スコープの正直な記録:** `plan_tasks`/`act_tasks`の中身(どのSKU/listingを評価対象にするかの
+    自動列挙)はまだ統合していない。CLIの`cycle run-once`は現時点で空のタスクリストを渡し、
+    サイクル機構(enqueue/skip判定・single-flight)自体の疎通を確認するだけに留めている。
+    実運用に向けては、supplier全件走査→research、対象listing全件→pricingのタスク組み立てを
+    別途統合する必要がある(将来のフェーズまたは追加対応)。
