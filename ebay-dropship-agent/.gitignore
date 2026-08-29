@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# local db / data
+*.db
+data/*
+!data/.gitkeep
+
+# env (root .gitignore already ignores .env*, kept here for clarity)
+.env
