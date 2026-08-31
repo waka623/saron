@@ -4,7 +4,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # env_file_encoding="utf-8": 明示しておく(pydantic-settings/python-dotenvの既定も実質UTF-8だが、
+    # 日本語コメントを含む.env/.env.exampleをロケール依存で読まれる余地を残さないため明示にする)。
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     ebay_env: str = "sandbox"
     ebay_client_id: str = ""

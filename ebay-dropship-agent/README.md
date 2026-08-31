@@ -60,6 +60,37 @@ curl -u demo:demo-pass -X POST http://127.0.0.1:8000/proposals/<id>/approve \
 叩くだけで、新しい判断ロジック・新しい実行経路は追加していない(`risk_level=high`の提案を承認しようと
 すると、既存の2段階確認どおり確認ダイアログが出る)。
 
+### Windows(PowerShell、WSL不要)
+
+上と同じ内容をWindowsネイティブのPowerShellで実行する場合のコマンド。**日本語Windows(cp932)でも
+追加設定なしでそのまま通る**(`alembic.ini`等の設定ファイルを非ASCII文字なしにし、`.env`/ロギング
+設定の読み込みを`encoding="utf-8"`で明示しているため。手動での文字コード修正は不要)。
+
+```powershell
+cd ebay-dropship-agent
+py -m venv .venv
+.venv\Scripts\Activate.ps1
+```
+もし「このシステムではスクリプトの実行が無効になっています」と出たら、次を実行してから
+`Activate.ps1`をやり直す(このPowerShellウィンドウだけに効く一時的な変更):
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+```
+```powershell
+pip install -e ".[dev]"
+Copy-Item .env.example .env
+
+alembic upgrade head
+ebay-dropship demo seed
+ebay-dropship cycle run-once --demo
+ebay-dropship proposals list
+
+$env:APPROVAL_API_USERS = "demo:demo-pass"
+ebay-dropship api serve --port 8000
+```
+ブラウザで **http://127.0.0.1:8000/ui** を開き、Basic認証で `demo` / `demo-pass`。
+承認/却下ボタン付きの画面が表示される。止めるときは `Ctrl+C`。
+
 **手順3)で何が起きているか:** `demo.py` の固定フィクスチャ(架空SKU「DEMO-SKU-1」・架空listing
 「DEMO-LISTING-1」)を使い、`research.evaluate_candidate`→`listing.generate_draft`(Plan)と
 `pricing.evaluate_next_action`(Check→Act)という既存のルールベース判断ロジックを実際に呼び出す。

@@ -620,3 +620,49 @@ withdraw実行機能自体の実装(F7で可視化のみ行い、機能追加は
   `curl -u demo:demo-pass http://127.0.0.1:.../ui`→承認ボタンが叩くのと同じリクエストをcurlで
   再現、まで通しで動作確認済み)。
 - 全体テスト: `207 passed`(前回の204 + 新規3件)。`ruff check`もクリーン。
+
+## 日本語Windows(cp932)での`alembic upgrade head`失敗を根本修正(2026-08-31)
+
+ユーザーから、日本語Windows環境で`alembic upgrade head`実行時に`alembic.ini`の文字コードエラーが
+出て手動修正が必要だった、という報告を受けた。原因を調査し、対症療法ではなく根本原因を特定して
+修正した。
+
+**根本原因**: Alembic自身(このプロジェクトのコードではなく`alembic`パッケージ内部)が
+`alembic.ini`を`configparser.read(path, encoding="locale")`で読んでいる
+(`alembic/util/compat.py::read_config_parser`、alembicのCLIエントリポイントから
+`migrations/env.py`が実行される**前**に呼ばれる)。Pythonの`encoding="locale"`は
+`locale.getencoding()`にフォールバックし、日本語WindowsではUTF-8ではなくcp932になる。
+このリポジトリの`alembic.ini`にはUTF-8で書かれた日本語コメントが含まれていたため、
+cp932としてデコードしようとして`UnicodeDecodeError`が発生していた(実際にファイルの生バイト列を
+cp932でデコードして再現・確認済み)。この読み込み経路はAlembic内部にあり、このプロジェクトの
+コードからは変更できない。
+
+**修正**:
+- `alembic.ini`: 日本語コメントを英語に書き換え、ファイル全体を非ASCIIバイト0個にした
+  (確認済み)。ASCIIバイトはcp932でもUTF-8でも同一にデコードされるため、ユーザー側のロケール設定に
+  一切依存せずミスマッチ自体が起こらなくなる。
+- `migrations/env.py`: `logging.config.fileConfig(...)`呼び出しに`encoding="utf-8"`を明示追加。
+  こちらはこのプロジェクトのコードが直接呼んでいる読み込み経路であり、`encoding`未指定だと
+  Pythonの`io.text_encoding(None)`が同じくOSロケール(日本語Windowsでcp932)にフォールバックする
+  ため、alembic.ini自体をASCII化した後も念のため明示した(二重の安全策)。
+- `src/ebay_dropship/config.py`: `Settings.model_config`に`env_file_encoding="utf-8"`を明示追加。
+  調査の結果、pydantic-settings/python-dotenvは`.env`読み込みの既定値が実質UTF-8固定
+  (`dotenv_values(..., encoding='utf8')`)であり、`.env`/`.env.example`自体はロケール依存の
+  問題は無いことを確認済みだが、将来のライブラリ挙動変更に備えて明示にした。
+- `pyproject.toml`の`description`フィールド(日本語を含む)は**意図的に変更していない**:
+  TOML仕様上パーサーは常にUTF-8として読むと規定されており(Pythonの`tomllib`もこれに従う)、
+  ロケール依存の読み込み経路が無いため、今回の障害とは無関係と判断した。
+- `src/`配下の`.py`ファイル内の日本語コメント・docstringも変更していない: Pythonのソースファイルは
+  PEP 3120によりインタプリタが常にUTF-8として解釈するため(OSロケールに依存しない)、対象外。
+
+**回帰テスト**: `tests/test_windows_encoding_safety.py`
+- `test_alembic_ini_contains_only_ascii_bytes`(alembic.iniの非ASCIIバイト混入を将来も検出)
+- `test_migrations_env_py_specifies_utf8_encoding_for_fileconfig`(env.pyのfileConfig呼び出しに
+  `encoding="utf-8"`が明示されていることを静的に確認)
+- `test_settings_env_file_encoding_is_explicitly_utf8`
+
+**検証**: 実際に`alembic.ini`の生バイト列をcp932でデコードするテストを行い、修正前(日本語コメント
+入り)は`UnicodeDecodeError`、修正後(ASCII化後)は正常にデコードできることを確認した。
+実際に`alembic upgrade head`を実行し、マイグレーションが通ることも確認済み(Linux環境のため
+cp932環境そのものの再現はできないが、根本原因の特定はAlembic自身のソースコードを直接読んで確認した
+ものであり、憶測ではない)。全体テスト: `210 passed`(前回の207 + 新規3件)。`ruff check`もクリーン。
