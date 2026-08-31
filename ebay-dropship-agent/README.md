@@ -52,7 +52,13 @@ curl -u demo:demo-pass -X POST http://127.0.0.1:8000/proposals/<id>/approve \
      -H "Content-Type: application/json" -d '{}'
 ```
 ブラウザから触る場合は `http://127.0.0.1:8000/proposals` にアクセスし、Basic認証ダイアログで
-`demo` / `demo-pass`(上で設定した`APPROVAL_API_USERS`の値)を入力する。
+`demo` / `demo-pass`(上で設定した`APPROVAL_API_USERS`の値)を入力する(こちらはJSON表示)。
+
+**承認/却下ボタン付きの簡単なHTML画面**も用意してある: `http://127.0.0.1:8000/ui` にアクセスすると
+(同じくBasic認証)、承認待ちの提案が表として並び、各行に「承認」「却下」ボタンが付いた画面が開く。
+ボタンは既存の`/proposals/{id}/approve`・`/proposals/{id}/reject`をブラウザ内のJavaScriptから
+叩くだけで、新しい判断ロジック・新しい実行経路は追加していない(`risk_level=high`の提案を承認しようと
+すると、既存の2段階確認どおり確認ダイアログが出る)。
 
 **手順3)で何が起きているか:** `demo.py` の固定フィクスチャ(架空SKU「DEMO-SKU-1」・架空listing
 「DEMO-LISTING-1」)を使い、`research.evaluate_candidate`→`listing.generate_draft`(Plan)と

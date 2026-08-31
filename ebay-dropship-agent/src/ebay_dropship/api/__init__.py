@@ -16,6 +16,11 @@
   `guardrails.gateway.execute_side_effect` の実行時再検査を経て処理する。Web UI が何を送っても、
   この再検査(利益ガードの再計算・在庫再確認・publish必須項目の再確認等)はバイパスできない
   ―― このAPIのコードは実行系のどの関数も呼ばないため、構造的にバイパス経路を持たない。
+- `GET /ui`: `/proposals`一覧を承認/却下ボタン付きの簡単なHTML画面として表示する(ブラウザで直接
+  操作する用)。認証は他のエンドポイントと同じ`require_auth`を経由する(`/healthz`以外は認証必須、
+  という既存方針を維持)。ページ自体は静的HTML+素のJavaScriptのみ(外部ライブラリ・CDN読み込み無し)で、
+  承認/却下は既存の`/proposals/{id}/approve`・`/proposals/{id}/reject`をブラウザから叩くだけ
+  ―― サーバ側に新しい判断ロジック・新しい実行経路は一切追加していない。
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ from decimal import Decimal
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
@@ -135,9 +141,145 @@ class RejectRequest(BaseModel):
     reason: str
 
 
+_UI_PAGE_HTML = """\
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>承認待ち提案</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; background: #fafafa; color: #222; }
+  h1 { font-size: 1.25rem; }
+  table { border-collapse: collapse; width: 100%; background: #fff; }
+  th, td { border: 1px solid #ddd; padding: 0.5rem 0.75rem; text-align: left; vertical-align: top; font-size: 0.9rem; }
+  th { background: #f0f0f0; }
+  button { padding: 0.3rem 0.8rem; margin-right: 0.4rem; cursor: pointer; border: none; border-radius: 4px; }
+  .approve { background: #2e7d32; color: #fff; }
+  .reject { background: #c62828; color: #fff; }
+  .risk-high { color: #c62828; font-weight: bold; }
+  .empty { color: #666; padding: 1rem; }
+</style>
+</head>
+<body>
+<h1>承認待ちの提案</h1>
+<p class="empty">publish/price_change/purchase はここでは実行されません(承認/却下のみ)。</p>
+<div id="status"></div>
+<table id="table" style="display:none">
+  <thead>
+    <tr><th>ID</th><th>種別</th><th>優先度</th><th>リスク</th><th>想定利益</th><th>概要 / 根拠</th><th>操作</th></tr>
+  </thead>
+  <tbody id="rows"></tbody>
+</table>
+<script>
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text == null ? '' : text;
+  return div.innerHTML;
+}
+
+async function loadProposals() {
+  const statusEl = document.getElementById('status');
+  const table = document.getElementById('table');
+  const rows = document.getElementById('rows');
+  statusEl.textContent = '読み込み中...';
+  const res = await fetch('/proposals');
+  if (!res.ok) {
+    statusEl.textContent = '読み込みに失敗しました(HTTP ' + res.status + ')。ページを再読み込みしてください。';
+    return;
+  }
+  const proposals = await res.json();
+  rows.innerHTML = '';
+  if (proposals.length === 0) {
+    statusEl.innerHTML = '<p class="empty">承認待ちの提案はありません。</p>';
+    table.style.display = 'none';
+    return;
+  }
+  statusEl.textContent = '';
+  table.style.display = '';
+  for (const p of proposals) {
+    const tr = document.createElement('tr');
+    const riskClass = p.risk_level === 'high' ? 'risk-high' : '';
+    tr.innerHTML =
+      '<td>' + escapeHtml(p.id) + '</td>' +
+      '<td>' + escapeHtml(p.proposal_type) + '</td>' +
+      '<td>' + escapeHtml(p.priority) + '</td>' +
+      '<td class="' + riskClass + '">' + escapeHtml(p.risk_level) + '</td>' +
+      '<td>' + escapeHtml(p.estimated_profit) + '</td>' +
+      '<td><strong>' + escapeHtml(p.summary) + '</strong><br><small>' + escapeHtml(p.rationale) + '</small></td>' +
+      '<td>' +
+        '<button class="approve" data-id="' + escapeHtml(p.id) + '" data-risk="' + escapeHtml(p.risk_level) + '">承認</button>' +
+        '<button class="reject" data-id="' + escapeHtml(p.id) + '">却下</button>' +
+      '</td>';
+    rows.appendChild(tr);
+  }
+}
+
+async function approve(id, riskLevel) {
+  let confirmFlag = false;
+  if (riskLevel === 'high') {
+    if (!window.confirm('risk_level=high の提案です。内容を確認のうえ承認してよいですか?')) return;
+    confirmFlag = true;
+  }
+  const res = await fetch('/proposals/' + encodeURIComponent(id) + '/approve', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({confirm: confirmFlag}),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    alert('承認に失敗しました: ' + (body.detail || res.status));
+    return;
+  }
+  loadProposals();
+}
+
+async function reject(id) {
+  const reason = window.prompt('却下理由を入力してください(必須):');
+  if (reason === null) return;
+  if (reason.trim() === '') { alert('却下理由は必須です。'); return; }
+  const res = await fetch('/proposals/' + encodeURIComponent(id) + '/reject', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({reason: reason}),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    alert('却下に失敗しました: ' + (body.detail || res.status));
+    return;
+  }
+  loadProposals();
+}
+
+document.getElementById('rows').addEventListener('click', function (event) {
+  const target = event.target;
+  if (target.classList.contains('approve')) {
+    approve(target.dataset.id, target.dataset.risk);
+  } else if (target.classList.contains('reject')) {
+    reject(target.dataset.id);
+  }
+});
+
+loadProposals();
+</script>
+</body>
+</html>
+"""
+
+
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/ui", response_class=HTMLResponse)
+def proposals_ui(username: Annotated[str, Depends(require_auth)]) -> HTMLResponse:
+    """`/proposals`を承認/却下ボタン付きの簡単なHTML画面として表示する(ブラウザ操作用)。
+
+    サーバ側は静的HTMLを返すだけで、一覧の取得・承認・却下は画面内のJavaScriptが
+    既存のJSON API(`/proposals`・`/proposals/{id}/approve`・`/proposals/{id}/reject`)を
+    そのまま叩く。新しい判断ロジック・新しい実行経路はここには一切無い。
+    """
+    return HTMLResponse(_UI_PAGE_HTML)
 
 
 @app.get("/proposals", response_model=list[ProposalOut])

@@ -597,3 +597,26 @@ withdraw実行機能自体の実装(F7で可視化のみ行い、機能追加は
 さらに、フレッシュな`.venv`+`.env.example`のコピーからREADME記載のコマンド列を実際に
 1行ずつ最後まで(alembic→seed→run-once --demo→proposals list/approve/reject→api serve→curl)
 実行し、記載通りに動くことを確認した。全体テスト: `204 passed`。`ruff check`もクリーン。
+
+## 承認/却下ボタン付きの簡単なHTML画面を追加(2026-08-31)
+
+ユーザー要望で、承認Web UIに`GET /ui`を追加した。既存の`/proposals`(JSON)はAPI契約を壊さない
+ため無変更のまま残し、`/ui`は別ルートとして新設(ブラウザで直接見るのは`/proposals`ではなく`/ui`)。
+
+- `src/ebay_dropship/api/__init__.py`: 静的HTML文字列(`_UI_PAGE_HTML`、外部ライブラリ・CDN読み込み
+  無し)を返すだけの`GET /ui`を追加。認証は他のエンドポイントと同じ`require_auth`を経由するため、
+  `/healthz`以外は認証必須という既存方針を維持している。画面内の素のJavaScriptが、承認/却下時に
+  既存の`/proposals/{id}/approve`・`/proposals/{id}/reject`をそのまま叩くだけで、サーバ側に新しい
+  判断ロジック・新しい実行経路は一切追加していない。`risk_level=high`の2段階確認(`confirm=true`)も
+  既存の409応答の挙動をそのまま踏襲し、ボタン側で`risk_level`を見て確認ダイアログを出してから送る。
+- ブラウザのHTTP Basic認証はオリジン単位でキャッシュされるため、`/ui`にアクセスして一度認証すれば、
+  画面内の`fetch('/proposals')`等は追加のログイン操作なしに同じ資格情報を再利用する(標準的な
+  ブラウザの挙動であり、こちら側で何か実装したわけではない)。
+- 既存の`tests/test_api.py`は無変更のままgreen。新規`tests/test_api_ui.py`
+  (`test_ui_requires_auth`/`test_ui_returns_html_with_valid_auth`/
+  `test_ui_wires_approve_and_reject_to_existing_endpoints`)で、認証必須・HTML応答・既存APIへの
+  導線が埋め込まれていることを検証した(画面内JSの実挙動はブラウザが無いと検証できないため対象外。
+  実際に`ebay-dropship demo seed`→`cycle run-once --demo`→APIサーバ起動→
+  `curl -u demo:demo-pass http://127.0.0.1:.../ui`→承認ボタンが叩くのと同じリクエストをcurlで
+  再現、まで通しで動作確認済み)。
+- 全体テスト: `207 passed`(前回の204 + 新規3件)。`ruff check`もクリーン。
