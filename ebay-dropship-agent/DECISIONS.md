@@ -730,6 +730,51 @@ publish POSTが実際に(フェイクへ)発行されること、を検証した
   出力(secrets自体を除く)を共有すること待ち。共有され次第、モックとの差異を
   「再現/失敗テスト→最小修正→green」の順で対応する。
 - `sandbox execute-price-change`(price_changeのSandbox実行CLI化)は未実装。
-- 上記のOAuthスコープ(`EbayOAuthClient`が基本スコープ固定)は実疎通で401が出た場合の第一候補の
-  修正対象として記録。
 - 従来からの残課題(F5/F6/F7のLOW findings、GO_LIVE.md (a)の残り3項目、境界値テスト等)は変更なし。
+
+## OAuthスコープ不足を実401を待たずに修正(2026-09-01)
+
+前回記録した懸念(`EbayOAuthClient`が基本スコープ固定でSell API群の個別スコープを要求していない)
+について、ユーザーから「eBay公式で必須スコープが明記されているので実401を待たずに直してほしい」との
+指示を受け、対応した。判断ロジック(利益ガード・承認ゲート・卸直送限定)は一切変更していない。
+
+**方針**: ユーザートークン(refresh_tokenフロー、Sell API群用)とアプリケーショントークン
+(client_credentialsフロー、ユーザー同意不要な読み取り専用API用)を明確に分け、それぞれに
+適切なスコープだけを要求する。
+
+- `src/ebay_dropship/adapters/ebay/auth.py`:
+  - eBay公式のOAuthスコープURIを定数化(`BASE_SCOPE`/`SELL_INVENTORY_SCOPE`/
+    `SELL_FULFILLMENT_SCOPE`/`SELL_ACCOUNT_SCOPE`/`SELL_ANALYTICS_READONLY_SCOPE`)。
+  - `EbayOAuthClient`(ユーザートークン)の`DEFAULT_SCOPES`を、上記5つすべてを含む
+    スペース区切り文字列に変更(1つのアクセストークンに複数スコープを持たせるのはeBay OAuthの
+    標準的な使い方であり、`EbayOAuthClient`自体の構造・キャッシュ方式は変更していない)。
+  - 新規`EbayApplicationOAuthClient`クラスを追加(client_credentialsフロー、`BASE_SCOPE`のみ要求)。
+    既存の`EbayOAuthClient`は無変更のまま残し、重複コードは許容してリスクの低い追加とした。
+  - **運用上の重要な注意**: refresh_token自体が、Sandboxの同意画面(「Get A Token」等)で
+    Inventory/Fulfillment/Account/Analyticsのスコープを許可されていない場合、コード側でいくら
+    要求しても`invalid_scope`で拒否される。その場合は同意をやり直してrefresh_tokenを再発行する
+    必要がある(コード修正だけでは解決しない)。
+- `src/ebay_dropship/adapters/ebay/client.py`:
+  - `EbayClient.__init__`に`self._app_auth`(`EbayApplicationOAuthClient`)を追加。
+  - `_authorized_headers`/`_request`/`_get`に`use_app_token: bool = False`引数を追加
+    (**既定Falseで既存の全呼び出し箇所の挙動は無変更**)。
+  - `search_competitive_listings`(Browse、特定の出品者データを扱わない読み取り専用API)のみ
+    `use_app_token=True`に変更。Inventory/Fulfillment/Analyticsは引き続きユーザートークンを使う。
+
+**回帰テスト**: `tests/test_ebay_auth_scopes.py`(新規4件、grant_typeごとに`scope`パラメータと
+`Authorization`ヘッダーを記録するローカル完結のフェイクを使用)
+- `test_user_token_refresh_requests_all_required_sell_scopes`(refresh_tokenの`scope`に
+  5つ全部が含まれること。修正前はBASE_SCOPEのみでred)
+- `test_search_competitive_listings_uses_application_token_not_user_token`(Browse呼び出しの
+  `Authorization`がアプリケーショントークンであること。修正前はユーザートークンを使っておりred)
+- `test_application_token_requests_only_base_scope`(アプリケーショントークンはBASE_SCOPEのみ要求)
+- `test_sell_apis_continue_to_use_the_user_token`(Inventory/Fulfillment/Analyticsが
+  引き続きユーザートークンを使うことの回帰防止)
+
+**検証**: 全体テスト`226 passed`(前回の222 + 新規4件)。既存の`test_ebay_auth.py`・
+`test_ebay_client.py`・`test_research_market_data.py`(Browseのテストを含む)はすべて無変更のまま
+green(いずれも`grant_type`やスコープの中身までは検証しておらず、レスポンス内容のみ検証していた
+ため、今回の変更と衝突しなかった)。`ruff check`もクリーン。
+実eBay Sandboxでの最終確認(スコープが実際に受理されるか、refresh_token自体に必要なスコープの
+同意が済んでいるか)はユーザーが自分のPCで`ebay-dropship sandbox check-auth`等を実行し、
+出力を共有した時点で行う。

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from ebay_dropship.adapters.ebay.auth import EbayOAuthClient
+from ebay_dropship.adapters.ebay.auth import EbayApplicationOAuthClient, EbayOAuthClient
 from ebay_dropship.adapters.ebay.rate_limit import CallBudget, retry_with_backoff
 
 SANDBOX_API_BASE = "https://api.sandbox.ebay.com"
@@ -76,6 +76,11 @@ class EbayClient:
         self._auth = EbayOAuthClient(
             client_id, client_secret, refresh_token, sandbox=sandbox, http_client=self._http
         )
+        # Browse等、特定の出品者データを扱わない読み取り専用API用のアプリケーショントークン
+        # (ユーザーの同意=refresh_token不要)。Sell API群は引き続き上のユーザートークンを使う。
+        self._app_auth = EbayApplicationOAuthClient(
+            client_id, client_secret, sandbox=sandbox, http_client=self._http
+        )
         # 5000 は Sell API の代表的な日次上限の目安。実際の値は get_rate_limits() で都度確認する。
         self.call_budget = call_budget or CallBudget(daily_limit=5000)
         self._retry_sleep = retry_sleep
@@ -97,11 +102,18 @@ class EbayClient:
     def get_access_token(self) -> str:
         return self._auth.get_access_token()
 
-    def _authorized_headers(self) -> dict:
-        return {"Authorization": f"Bearer {self.get_access_token()}"}
+    def _authorized_headers(self, *, use_app_token: bool = False) -> dict:
+        token = self._app_auth.get_access_token() if use_app_token else self.get_access_token()
+        return {"Authorization": f"Bearer {token}"}
 
     def _request(
-        self, method: str, path: str, *, json: dict | None = None, params: dict | None = None
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict | None = None,
+        params: dict | None = None,
+        use_app_token: bool = False,
     ) -> httpx.Response:
         self.call_budget.record_call()
 
@@ -109,15 +121,15 @@ class EbayClient:
             return self._http.request(
                 method,
                 f"{self.base_url}{path}",
-                headers=self._authorized_headers(),
+                headers=self._authorized_headers(use_app_token=use_app_token),
                 params=params,
                 json=json,
             )
 
         return retry_with_backoff(do_request, sleep=self._retry_sleep)
 
-    def _get(self, path: str, params: dict | None = None) -> dict:
-        response = self._request("GET", path, params=params)
+    def _get(self, path: str, params: dict | None = None, *, use_app_token: bool = False) -> dict:
+        response = self._request("GET", path, params=params, use_app_token=use_app_token)
         if response.status_code >= 400:
             raise EbayApiError(f"{path} 呼び出しに失敗: {response.status_code} {response.text}")
         return response.json()
@@ -144,11 +156,15 @@ class EbayClient:
 
     # --- Browse (Phase 3) ---
     def search_competitive_listings(self, keywords: str, category_id: str | None = None) -> list[dict]:
-        """Browse API の item_summary/search(読み取り専用)。相場・競合点数の算出に使う。"""
+        """Browse API の item_summary/search(読み取り専用)。相場・競合点数の算出に使う。
+
+        特定の出品者データを扱わないため、ユーザーの同意が要らないアプリケーショントークンを使う
+        (Sell API群のユーザートークンとは別。auth.py参照)。
+        """
         params: dict = {"q": keywords}
         if category_id:
             params["category_ids"] = category_id
-        data = self._get(BROWSE_SEARCH_PATH, params=params)
+        data = self._get(BROWSE_SEARCH_PATH, params=params, use_app_token=True)
         return data.get("itemSummaries", [])
 
     # --- Taxonomy (今回未使用。必要になれば同様のパターンで追加) ---
