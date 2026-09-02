@@ -666,3 +666,70 @@ cp932でデコードして再現・確認済み)。この読み込み経路はAl
 実際に`alembic upgrade head`を実行し、マイグレーションが通ることも確認済み(Linux環境のため
 cp932環境そのものの再現はできないが、根本原因の特定はAlembic自身のソースコードを直接読んで確認した
 ものであり、憶測ではない)。全体テスト: `210 passed`(前回の207 + 新規3件)。`ruff check`もクリーン。
+
+## タスク3(実eBay Sandbox E2E)着手 — このセッションからは実eBayへ接続不可(2026-08-31)
+
+ユーザーから実Sandboxキー・テストユーザーが準備でき、GO_LIVE.md (b)の実疎通確認に進みたいとの依頼を
+受けたが、着手前に本セッション(Claude Codeの実行コンテナ)から`api.sandbox.ebay.com`・
+`developer.ebay.com`への送信をそれぞれ試したところ、両方とも組織のエグレスポリシーにより
+`connect_rejected`(403)で拒否されることを確認した。プロキシの手順書
+(`/root/.ccr/README.md`)には「403/407は組織ポリシーによる拒否であり、リトライ・回避をせず報告する
+こと」と明記されているため、これ以上の接続試行はしていない。コード・認証情報の問題ではなく、
+このセッションのネットワークポリシー(環境作成時に選択されるもの)がeBayのドメインを許可していない
+ことが原因である。
+
+ユーザーに状況を説明し、(a)このセッションのネットワークポリシーを見直して許可する、
+(b)ユーザー自身のPC上で実疎通確認を行い、結果(secrets自体は含まない出力)をこのセッションに
+共有してコード修正を行う、の2択を提示したところ、**(b)自分のPCで実行**を選択された。
+
+これを受けて、実Sandboxキーを一切このセッション(チャット)に入力せずに済むよう、
+`ebay-dropship sandbox ...` というCLIコマンド群を新設した。ユーザーが自分のPC上でこれらを実行し、
+出力(トークン値やcert idそのものは含まれない設計)を共有すれば、そこから差異の分析・修正に移れる。
+
+- `sandbox check-auth`: OAuth(refresh_tokenフロー)でアクセストークンが取得できるか確認する。
+  取得したトークンの値自体は一切出力しない(長さのみ表示)。
+- `sandbox rate-limits`: Developer Analytics API の`getRateLimits`(読み取り専用)。
+- `sandbox get-orders [--since ...]`: Fulfillment API の`getOrders`(読み取り専用)。購入者の個人情報
+  (氏名・住所等)は出力せず、orderId・ステータス・合計金額のみ要約して出力する。
+- `sandbox seed-test-item --category-id <id> [--sku/--title/--description/--list-price/...]`:
+  Sandbox検証用のpublish提案を承認キューに積む(この時点では何もeBayへ送信しない)。
+  その後は通常通り`proposals approve`で承認する。
+- `sandbox execute-publish <id> [--live] [--calls-remaining N]`: 承認済みの検証用publish提案を実行する。
+  **既定はdry_run(何も送信しない)**。`--live`を明示して初めて実際にSandboxへ送信する
+  (`orchestrator/do.py::execute_publish`をそのまま呼ぶだけで、判断ロジック・guardrailsは無変更)。
+- いずれのコマンドも`EBAY_ENV=production`では実行そのものを拒否する(`_require_sandbox_env`、
+  タスク要件「本番キー・実発注フラグは有効化しない」を構造的に強制)。
+
+price_changeのCLI化(`sandbox execute-price-change`)は今回のタスクの範囲(a-d)に含まれていなかったため
+未実装のまま。GO_LIVE.mdに次回タスクの候補として明記した。
+
+**事前に発見した懸念(コードレビューベース、実疎通での確認はまだ)**: `adapters/ebay/auth.py`の
+`EbayOAuthClient`が常に固定スコープ`https://api.ebay.com/oauth/api_scope`(基本スコープ)のみで
+トークンをリフレッシュしている。Inventory/Fulfillment/Analytics(Sell API群)は本来
+`sell.inventory`/`sell.fulfillment`/`sell.analytics.readonly`等の個別スコープが必要なはずで、
+実際に401(insufficient scope)になる可能性がある。実疎通の結果を見てから対応する(判断ロジックの
+変更ではなくスコープ設定の問題であり、`sandbox check-auth`/各コマンドの実行結果で確認できる)。
+
+**テスト**: `tests/test_cli_sandbox.py`(12件)。実ネットワークは一切使わず、Inventory/Fulfillment/
+Analyticsの最小限のルートをまとめたローカル完結のフェイクトランスポートで、
+(1) `EBAY_ENV=production`では全コマンドが拒否されること、(2) `check-auth`が成功時にトークン値を
+一切出力しないこと・失敗時にクリーンにエラー終了すること、(3) `rate-limits`/`get-orders`が期待した
+要約を出力すること、(4) `seed-test-item`→`proposals approve`→`execute-publish`(dry-run/`--live`
+両方)の一連の流れが正しく動作し、dry-runでは実送信が0件、`--live`ではInventory PUT→offer POST→
+publish POSTが実際に(フェイクへ)発行されること、を検証した。
+
+**検証**: 全体テスト`222 passed`(前回の210 + 新規12件)。`ruff check`もクリーン。
+実eBay Sandboxそのものへの疎通は、本セッションからは上記の理由により未実施。ユーザーが自分のPCで
+`sandbox`コマンド群を実行し、その出力(secrets自体を含まない)を共有した時点で、
+タスク3の(2)(3)(GO_LIVE.md (b)の実施・差異の洗い出しと修正)を再開する。
+
+## 次タスクへの残課題(更新)
+
+- **タスク3継続**: ユーザーが自分のPCで`ebay-dropship sandbox check-auth`/`rate-limits`/
+  `get-orders`/`seed-test-item`→`proposals approve`→`execute-publish [--live]`を実行し、
+  出力(secrets自体を除く)を共有すること待ち。共有され次第、モックとの差異を
+  「再現/失敗テスト→最小修正→green」の順で対応する。
+- `sandbox execute-price-change`(price_changeのSandbox実行CLI化)は未実装。
+- 上記のOAuthスコープ(`EbayOAuthClient`が基本スコープ固定)は実疎通で401が出た場合の第一候補の
+  修正対象として記録。
+- 従来からの残課題(F5/F6/F7のLOW findings、GO_LIVE.md (a)の残り3項目、境界値テスト等)は変更なし。

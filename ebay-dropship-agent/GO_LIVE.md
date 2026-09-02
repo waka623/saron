@@ -24,17 +24,21 @@
 
 実 Sandbox 認証情報(`EBAY_CLIENT_ID` / `EBAY_CLIENT_SECRET` / `EBAY_REFRESH_TOKEN`)を `.env` に設定した後、
 **以下すべてを実 Sandbox に対して実行し、成功を確認する**(コードは実装済み。これまではモックで検証してきた)。
+`ebay-dropship sandbox ...`(2026-08-31追加)が各項目を実行するCLIコマンドを提供する
+(`EBAY_ENV=production`では全コマンドを拒否するSandbox専用。トークン自体は出力しない)。
 
-- [ ] **OAuth**: `EbayClient.from_settings(settings).get_access_token()` がトークンを取得できる
+- [ ] **OAuth**: `ebay-dropship sandbox check-auth` がトークンを取得できる
       (`adapters/ebay/auth.py`。テストは `tests/test_ebay_auth.py` で仕組みをモック検証済み)。
-- [ ] **Inventory / publish**: Sandbox の自分のアカウントに対し、テスト用SKUで
-      `execute_publish`(`orchestrator/do.py`)を実行し、実際に出品(Sandbox上)できる。
-      `dry_run=True` で先に送信内容を確認してから `dry_run=False` に進むこと。
+- [ ] **Inventory / publish**: `ebay-dropship sandbox seed-test-item --category-id <実際のSandboxカテゴリID>` →
+      `ebay-dropship proposals approve <id> --by <name>` → `ebay-dropship sandbox execute-publish <id>` の順で、
+      Sandbox の自分のアカウントに対しテスト用SKUで実際に出品(Sandbox上)できる。
+      既定は `dry_run`(何も送信しない)。`--live` を付けて初めて実送信する。
 - [ ] **Inventory / price_change**: 上記で作成したSandbox出品に対し `execute_price_change` を実行し、
-      価格変更が反映される。
-- [ ] **Fulfillment / getOrders**: `EbayClient.get_orders()` がSandbox上の注文(あれば)を取得できる。
+      価格変更が反映される(現時点ではCLIコマンド化していない。`execute_price_change`を直接呼ぶ、
+      または今後 `sandbox execute-price-change` を追加する)。
+- [ ] **Fulfillment / getOrders**: `ebay-dropship sandbox get-orders` がSandbox上の注文(あれば)を取得できる。
       Sandboxでテスト注文を発生させる手段がある場合はそれも使う。
-- [ ] **Analytics / get_rate_limits**: `EbayClient.get_rate_limits()` が実際のレート状況を返す
+- [ ] **Analytics / get_rate_limits**: `ebay-dropship sandbox rate-limits` が実際のレート状況を返す
       (`alerts.alert_for_rate_budget` の実データでの動作確認も兼ねる)。
 - [ ] 上記すべてで、監査に必要な情報(`proposals.status`・`decided_by`・`decided_at`・payload中の
       `ebay_item_id`/`ebay_offer_id`/`ebay_listing_id`等)が正しく記録されていることを確認する。
