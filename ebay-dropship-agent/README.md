@@ -167,6 +167,15 @@ LLMは一切使わない。結果として `hold`(出品候補として次段へ
   publish拒否・レート制限・部分成功・重複の4失敗モードを再現)。
 - **重要(TODO・未消化):** 実 Sandbox 認証情報でのエンドツーエンドE2Eは本番投入前の必須ゲート。
   `DECISIONS.md` の Phase 4 節参照。これが済むまで `EBAY_ENV=production` には進まない。
+- **`execute-publish --live` を実行する前に**、`ebay-dropship sandbox setup-selling` を一度実行しておくこと
+  (支払い/返品/配送ポリシーとmerchant locationを準備する。未実行だと `listingPolicies` が空のまま
+  `publishOffer` が失敗する。詳細は `GO_LIVE.md` (b) 参照)。
+  必須カテゴリアスペクト(Taxonomy API)のうち `--brand` 等で未指定のものはプレースホルダで自動補完されるが、
+  カテゴリによっては選択肢が限定された必須アスペクト(バリエーション必須のカテゴリ等)があり自動補完では
+  通らない場合がある。Sandbox検証では、このリポジトリのテストでも使っている `--category-id 9355`
+  (Cell Phones & Smartphones)のような一般的なカテゴリで試し、`execute-publish --live` が失敗する場合は
+  eBay Developer Program の Taxonomy API(`getItemAspectsForCategory`)で当該カテゴリの必須アスペクトを
+  確認し、`seed-test-item` のオプション追加や `item_specifics` の手動調整で対応すること。
 
 ## 過去のステータス: Phase 3(Plan: リサーチ+出品ドラフト生成)完了
 

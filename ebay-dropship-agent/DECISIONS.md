@@ -831,3 +831,99 @@ CLI統合テスト)。
 **検証**: 全体テスト`242 passed`(前回の226 + 新規16件)。`ruff check`もクリーン。
 `--help`表示も確認済み。実eBayへの接続は本セッションからは行っていない(引き続きユーザーが
 自分のPCで実行し、結果を共有する前提)。
+
+---
+
+## `execute-publish --live` を成功させるための準備(setup-selling・アスペクト自動補完)を追加(2026-09-05)
+
+**背景**: dry-runは通っていたが、`--live`ではpublishOfferが以下の理由で失敗する見込みだった。
+1. offerの`listingPolicies`が常に空({})だった(支払い/返品/配送ポリシーが未設定)。
+2. `merchantLocationKey='default'`が実Sandboxアカウント上に作られていない。
+3. カテゴリごとの必須item aspect(Taxonomy APIの`getItemAspectsForCategory`)が未充足だと
+   publishOfferがエラーになる(`seed-test-item`は`--brand`しか埋めない)。
+
+いずれもコードのバグではなく「Sandboxアカウント側の一度きりの初期設定」と「カテゴリ依存の
+必須項目」であるため、既存の`execute_publish`のロジック(利益ガード・承認ゲート・卸直送の判断)
+には一切手を入れず、以下を追加した。
+
+### A) `ebay-dropship sandbox setup-selling`(新規、Sandbox限定)
+
+- `src/ebay_dropship/adapters/ebay/client.py`: Account API(`opt_in_selling_policy_management`
+  /`list_payment_policies`/`create_payment_policy`/`list_return_policies`/`create_return_policy`
+  /`list_fulfillment_policies`/`create_fulfillment_policy`)とInventory location
+  (`get_merchant_location`/`create_merchant_location`)を追加。
+  - `opt_in_selling_policy_management`は「既にオプトイン済み」エラー(想定errorId=20404。
+    eBay公式ドキュメントに基づく想定値で、実Sandboxで異なる場合はTask 3の実疎通で修正する)を
+    握りつぶしてFalseを返す(冪等)。
+  - これらはproposal(承認が必要な個別の出品/価格変更/発注)に紐づく副作用ではなく、
+    アカウント全体に対する一度きりの設定操作のため、`guardrails.gateway.execute_side_effect`
+    は経由させていない(意図的。既存の書き込みメソッド静的検査`test_ebay_write_methods_are_
+    only_called_through_guardrail_gateway`が対象とする`create_or_update_inventory_item`等の
+    4メソッドとは別名にしてあり、検査対象を広げる必要も無い)。安全策は`_require_sandbox_env()`
+    (production拒否)のみで十分と判断した(D方針どおり)。
+- `src/ebay_dropship/adapters/ebay/selling_setup.py`(新規): 「名前で既存ポリシー/ロケーションを
+  探し、無ければ最小構成ペイロードで作成する」冪等ロジック(`run_setup_selling`)。3つのポリシーは
+  `ebay-dropship-agent Default {Payment,Return,Fulfillment} Policy`という固定名で識別する。
+  支払いポリシーはEBAY_USがManaged Payments前提のため`paymentMethods`を含めない最小構成にした
+  (eBay公式ドキュメントの記載に基づく判断。実Sandboxでの検証待ち)。取得した4つの値
+  (`EBAY_PAYMENT_POLICY_ID`/`EBAY_RETURN_POLICY_ID`/`EBAY_FULFILLMENT_POLICY_ID`/
+  `EBAY_MERCHANT_LOCATION_KEY`)は既存の`envfile.upsert_env_var`で`.env`に書き込む。
+- `cli/__init__.py`: `sandbox setup-selling`コマンド。`_require_sandbox_env()`必須。
+  policyId/location keyの値自体は出力せず、「新規作成/既存を再利用」という状態と
+  先頭数文字+長さのマスク要約のみ表示する(get-refresh-tokenと同じ方針)。
+
+### B) `execute_publish`のoffer作成に`.env`の設定値を反映
+
+- `orchestrator/do.py::_offer_payload`にsettings引数を追加し、`listingPolicies`に
+  `EBAY_FULFILLMENT_POLICY_ID`/`EBAY_PAYMENT_POLICY_ID`/`EBAY_RETURN_POLICY_ID`(設定されている
+  ものだけ)を、`merchantLocationKey`に`EBAY_MERCHANT_LOCATION_KEY`(未設定なら従来通り'default')
+  を入れるようにした。dry-run/live両方の`_offer_payload`呼び出しに同じ関数を使うため、
+  dry-runのプレビュー表示にも設定値がそのまま反映される(ネットワーク呼び出しは増やしていない
+  ので、dry-runが「何も送信しない」という既存の不変条件は維持している)。
+
+### C) カテゴリ必須アスペクトの自動補完
+
+- `src/ebay_dropship/adapters/ebay/taxonomy.py`(新規): `getItemAspectsForCategory`のレスポンスから
+  必須アスペクト名を抽出する`required_aspect_names`と、未指定分にプレースホルダ(既定`Unbranded`)
+  を補う`complete_required_aspects`。ネットワークI/Oを持たない純粋関数として独立させ、
+  ユニットテストしやすくした。
+- `EbayClient.get_item_aspects_for_category`: Taxonomy APIは`get_default_category_tree_id`で
+  カテゴリツリーIDを引いてから`get_item_aspects_for_category`を呼ぶ2段構成(公式仕様どおり)。
+  特定の出品者データを扱わないためアプリケーショントークン(`use_app_token=True`)を使う
+  (Browseと同じ扱い)。
+- **適用範囲を`execute_publish`のlive実行時(`"ebay_item_id" not in payload`の初回ステップ内)に
+  限定し、`seed-test-item`には追加しなかった**(要件の文面は「seed-test-item / execute-publishで」
+  だったが、以下の理由で意図的に絞った):
+  - `seed-test-item`は現状ネットワークI/Oを一切持たない(プロポーザルをDBに積むだけ)設計になって
+    おり、承認前の段階でSandboxへの疎通を必須にする理由が無い。
+  - `execute_publish`はどのみち`ebay_item_id`確定前に一度だけ通る、副作用未確定の安全な地点であり、
+    ここで完結させれば`seed-test-item`経由でも他の経路(将来のPlanエージェント発の出品提案等)でも
+    等しく必須アスペクトが補完される。`"ebay_item_id" not in payload`という既存の冪等ガードに
+    相乗りさせているため、リトライ時に二重にTaxonomyへ問い合わせることもない。
+  - Taxonomy取得はベストエフォート(`EbayApiError`を捕捉して無視)。取得に失敗しても既存の
+    `item_specifics`のまま publish 自体は試みる(従来の挙動からの後退にしない)。
+  - dry-runはこのブロックの手前(`if dry_run: ... return`)で復帰するため、引き続きネットワーク
+    呼び出しゼロを維持する。
+
+**変更していないもの**: 利益ガード・承認ゲート・卸直送チェック(`guardrails/`)、
+`execute_price_change`・`execute_purchase`のロジック、既存の4つの書き込みメソッド静的検査の対象。
+
+**テスト**(26件追加):
+- `tests/test_taxonomy_aspects.py`(6件): 必須アスペクト抽出・プレースホルダ補完の純粋ロジック。
+- `tests/test_ebay_client_selling_setup.py`(11件): 新規Account/Inventory location/Taxonomy
+  メソッドの実HTTPパス・パラメータ・オプトイン済み時の冪等な振る舞い。
+- `tests/test_ebay_selling_setup.py`(3件): `run_setup_selling`の初回作成・2回目冪等再利用・
+  `.env`上書きを、フェイクの`EbayClient`スタブで検証。
+- `tests/test_cli_sandbox.py`(既存ファイルに追加): `setup-selling`のproduction拒否・初回作成
+  (マスク表示・`.env`書き込み)・2回目冪等・`execute-publish --live`でのlistingPolicies/
+  merchantLocationKey注入・必須アスペクト自動補完(`Brand`指定は上書きしない)を追加。
+  既存の`SandboxFakeBackend`にAccount/Inventory location/Taxonomyのルートを拡張した
+  (状態を保持し、実Sandboxの「無ければ作成・有れば再利用」を模す)。
+
+**検証**: 全体テスト`268 passed`(前回の242 + 新規26件)。`ruff check`もクリーン。
+`ebay-dropship sandbox --help`/`setup-selling --help`表示も確認済み。実eBayへの接続は本セッション
+からは行っていない(このコードはTask 3として引き続きユーザーが自分のPCの実Sandboxで検証する)。
+
+**残課題**: `paymentMethods`省略や`ALREADY_OPTED_IN_ERROR_ID=20404`はeBay公式ドキュメントに基づく
+想定であり、実Sandboxでの実疎通で異なることが判明した場合はTask 3の枠組み(再現/失敗テスト→
+最小修正→green)で修正する。

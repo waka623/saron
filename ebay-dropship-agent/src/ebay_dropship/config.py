@@ -13,6 +13,12 @@ class Settings(BaseSettings):
     ebay_client_secret: str = ""
     ebay_redirect_uri: str = ""
     ebay_refresh_token: str = ""
+    # `sandbox setup-selling` が作成/取得して書き込む値(execute_publish の offer 作成に使う)。
+    # 未設定のままだと listingPolicies が空になり、--live の publishOffer が失敗する(DECISIONS.md参照)。
+    ebay_payment_policy_id: str = ""
+    ebay_return_policy_id: str = ""
+    ebay_fulfillment_policy_id: str = ""
+    ebay_merchant_location_key: str = "default"
 
     supplier_integration_mode: str = "csv"  # csv | api
     supplier_csv_path: str = "./data/supplier_feed.csv"

@@ -6,14 +6,16 @@
     ebay-dropship proposals reject <id> --by <name> --reason "..."
     ebay-dropship cycle run-once [--demo]
     ebay-dropship demo seed
-    ebay-dropship sandbox check-auth / get-orders / rate-limits / seed-test-item / execute-publish
+    ebay-dropship sandbox check-auth / get-orders / rate-limits / setup-selling
+    ebay-dropship sandbox seed-test-item / execute-publish
     ebay-dropship sandbox get-refresh-token
     ebay-dropship api serve
 
 `--demo`/`demo seed` は実キー・実発注を一切使わないデモ専用の経路(README「Quickstart(デモ)」参照)。
 `sandbox` サブコマンドは.envに設定した実eBay Sandboxキーを使って実際に疎通する(`get-refresh-token`を
 除きEBAY_ENV=productionでは実行を拒否するSandbox専用。`get-refresh-token`はrefresh_token取得の
-汎用ヘルパーとしてSandbox/production両対応)。
+汎用ヘルパーとしてSandbox/production両対応)。`setup-selling`は`execute-publish --live`の前提となる
+ビジネスポリシー・出荷元ロケーションを準備する(冪等。GO_LIVE.md (b)参照)。
 """
 
 from __future__ import annotations
@@ -211,6 +213,56 @@ def sandbox_rate_limits() -> None:
         return
     for status in statuses:
         click.echo(f"  {status.api_name}: 残り{status.calls_remaining}/{status.daily_limit}")
+
+
+@sandbox.command("setup-selling")
+@click.option(
+    "--env-file", "env_file", default=".env", show_default=True, help="policyId等を書き込む.envファイルのパス。"
+)
+def sandbox_setup_selling(env_file: str) -> None:
+    """execute-publish --live の前提となるビジネスポリシー・出荷元ロケーションを準備する(冪等)。
+
+    (1) Account APIでSELLING_POLICY_MANAGEMENTにオプトイン、(2) 支払い/返品/配送ポリシーを
+    marketplaceId=EBAY_USで「無ければ作成・有れば再利用」、(3) merchant location(既定'default')を
+    「無ければ作成」する。取得したpolicyId/location keyは.envに書き込む(値自体は出力しない)。
+    """
+    _require_sandbox_env()
+    from ebay_dropship.adapters.ebay import EbayApiError, EbayClient
+    from ebay_dropship.adapters.ebay.selling_setup import run_setup_selling
+
+    client = EbayClient.from_settings(settings)
+    try:
+        report = run_setup_selling(client, env_file=env_file)
+    except EbayApiError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    def _mask(value: str) -> str:
+        return f"先頭{value[:4]}.../長さ{len(value)}文字" if value else "(空)"
+
+    click.echo(
+        "オプトイン(SELLING_POLICY_MANAGEMENT): "
+        + ("実行しました" if report.opted_in_this_run else "既にオプトイン済みでした")
+    )
+    click.echo(
+        f"支払いポリシー: {'新規作成' if report.payment_policy_created else '既存を再利用'} "
+        f"({_mask(report.payment_policy_id)})"
+    )
+    click.echo(
+        f"返品ポリシー: {'新規作成' if report.return_policy_created else '既存を再利用'} "
+        f"({_mask(report.return_policy_id)})"
+    )
+    click.echo(
+        f"配送ポリシー: {'新規作成' if report.fulfillment_policy_created else '既存を再利用'} "
+        f"({_mask(report.fulfillment_policy_id)})"
+    )
+    click.echo(
+        f"出荷元ロケーション({report.merchant_location_key}): "
+        + ("新規作成" if report.merchant_location_created else "既存を再利用")
+    )
+    click.echo(
+        f"{env_file} に EBAY_PAYMENT_POLICY_ID / EBAY_RETURN_POLICY_ID / "
+        "EBAY_FULFILLMENT_POLICY_ID / EBAY_MERCHANT_LOCATION_KEY を保存しました。"
+    )
 
 
 @sandbox.command("get-orders")

@@ -35,10 +35,21 @@ access token(2時間)のみを返しrefresh_token(18か月)は返さない。
 
 - [ ] **OAuth**: `ebay-dropship sandbox check-auth` がトークンを取得できる
       (`adapters/ebay/auth.py`。テストは `tests/test_ebay_auth.py` で仕組みをモック検証済み)。
-- [ ] **Inventory / publish**: `ebay-dropship sandbox seed-test-item --category-id <実際のSandboxカテゴリID>` →
+- [ ] **Account / 出品前提のセットアップ**(2026-09-05追加): `ebay-dropship sandbox setup-selling` を実行する。
+      SELLING_POLICY_MANAGEMENTへのオプトイン→支払い/返品/配送ポリシー(marketplaceId=EBAY_US、
+      無ければ最小構成で作成・有れば再利用)→merchant location(既定`default`、無ければ米国ダミー住所で作成)
+      を行い、`.env` に `EBAY_PAYMENT_POLICY_ID` / `EBAY_RETURN_POLICY_ID` / `EBAY_FULFILLMENT_POLICY_ID` /
+      `EBAY_MERCHANT_LOCATION_KEY` を書き込む(冪等。何度実行しても重複作成しない。値自体は出力しない)。
+      **`execute-publish --live` が成功するための前提であり、未実行だと listingPolicies が空のまま
+      publishOffer が失敗する見込み。**
+- [ ] **Inventory / publish**: 上記 `setup-selling` を実行済みの状態で、
+      `ebay-dropship sandbox seed-test-item --category-id <実際のSandboxカテゴリID>` →
       `ebay-dropship proposals approve <id> --by <name>` → `ebay-dropship sandbox execute-publish <id>` の順で、
       Sandbox の自分のアカウントに対しテスト用SKUで実際に出品(Sandbox上)できる。
       既定は `dry_run`(何も送信しない)。`--live` を付けて初めて実送信する。
+      `--live` 実行時、指定カテゴリの必須アスペクト(Taxonomy API)のうち item_specifics に無いものは
+      プレースホルダ(`Unbranded`等)で自動補完される(ベストエフォート。Taxonomy取得に失敗した場合は
+      既存の item_specifics のまま publish を試みる)。
 - [ ] **Inventory / price_change**: 上記で作成したSandbox出品に対し `execute_price_change` を実行し、
       価格変更が反映される(現時点ではCLIコマンド化していない。`execute_price_change`を直接呼ぶ、
       または今後 `sandbox execute-price-change` を追加する)。

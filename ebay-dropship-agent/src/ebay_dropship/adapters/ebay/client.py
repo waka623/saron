@@ -25,9 +25,23 @@ BROWSE_SEARCH_PATH = "/buy/browse/v1/item_summary/search"
 INVENTORY_ITEM_PATH = "/sell/inventory/v1/inventory_item"
 OFFER_PATH = "/sell/inventory/v1/offer"
 FULFILLMENT_ORDER_PATH = "/sell/fulfillment/v1/order"
+ACCOUNT_OPT_IN_PATH = "/sell/account/v1/program/opt_in"
+PAYMENT_POLICY_PATH = "/sell/account/v1/payment_policy"
+RETURN_POLICY_PATH = "/sell/account/v1/return_policy"
+FULFILLMENT_POLICY_PATH = "/sell/account/v1/fulfillment_policy"
+INVENTORY_LOCATION_PATH = "/sell/inventory/v1/location"
+TAXONOMY_DEFAULT_TREE_PATH = "/commerce/taxonomy/v1/get_default_category_tree_id"
+TAXONOMY_ASPECTS_PATH = "/commerce/taxonomy/v1/category_tree/{tree_id}/get_item_aspects_for_category"
 
 # eBay Inventory API のエラーコード。offer が既にSKUに紐づいて存在する場合(重複防止・冪等性のため参照)。
 DUPLICATE_OFFER_ERROR_ID = 25002
+# eBay公式ドキュメントに基づく想定値(Account API opt_in が「既にオプトイン済み」を返すとき)。
+# 実Sandboxでの実際の値がこれと異なる場合は、Task 3の実疎通で確認して修正する(DECISIONS.md参照)。
+ALREADY_OPTED_IN_ERROR_ID = 20404
+
+
+def _has_error_id(data: dict, error_id: int) -> bool:
+    return any(error.get("errorId") == error_id for error in data.get("errors", []))
 
 
 class EbayApiError(Exception):
@@ -212,3 +226,80 @@ class EbayClient:
             params["filter"] = f"creationdate:[{since}..]"
         data = self._get(FULFILLMENT_ORDER_PATH, params=params)
         return data.get("orders", [])
+
+    # --- Account (`sandbox setup-selling` 専用。承認ゲートを経由するproposal実行とは別系統の
+    # アカウント設定操作であり、guardrails.gateway を通さない。個別のproposalに紐づく副作用ではない
+    # ため。呼び出しは cli/__init__.py の sandbox setup-selling コマンドのみ) ---
+    def opt_in_selling_policy_management(self) -> bool:
+        """Account API opt_in(SELLING_POLICY_MANAGEMENT)。既にオプトイン済みなら False を返す(冪等)。"""
+        response = self._request(
+            "POST", ACCOUNT_OPT_IN_PATH, json={"programType": "SELLING_POLICY_MANAGEMENT"}
+        )
+        if response.status_code < 400:
+            return True
+        data = response.json() if response.content else {}
+        if _has_error_id(data, ALREADY_OPTED_IN_ERROR_ID):
+            return False
+        raise EbayApiError(f"opt_in(SELLING_POLICY_MANAGEMENT)に失敗: {response.status_code} {response.text}")
+
+    def list_payment_policies(self, marketplace_id: str) -> list[dict]:
+        data = self._get(PAYMENT_POLICY_PATH, params={"marketplace_id": marketplace_id})
+        return data.get("paymentPolicies", [])
+
+    def create_payment_policy(self, payload: dict) -> dict:
+        response = self._request("POST", PAYMENT_POLICY_PATH, json=payload)
+        if response.status_code >= 400:
+            raise EbayApiError(f"payment_policy作成に失敗: {response.status_code} {response.text}")
+        return response.json()
+
+    def list_return_policies(self, marketplace_id: str) -> list[dict]:
+        data = self._get(RETURN_POLICY_PATH, params={"marketplace_id": marketplace_id})
+        return data.get("returnPolicies", [])
+
+    def create_return_policy(self, payload: dict) -> dict:
+        response = self._request("POST", RETURN_POLICY_PATH, json=payload)
+        if response.status_code >= 400:
+            raise EbayApiError(f"return_policy作成に失敗: {response.status_code} {response.text}")
+        return response.json()
+
+    def list_fulfillment_policies(self, marketplace_id: str) -> list[dict]:
+        data = self._get(FULFILLMENT_POLICY_PATH, params={"marketplace_id": marketplace_id})
+        return data.get("fulfillmentPolicies", [])
+
+    def create_fulfillment_policy(self, payload: dict) -> dict:
+        response = self._request("POST", FULFILLMENT_POLICY_PATH, json=payload)
+        if response.status_code >= 400:
+            raise EbayApiError(f"fulfillment_policy作成に失敗: {response.status_code} {response.text}")
+        return response.json()
+
+    # --- Inventory location (`sandbox setup-selling` 専用) ---
+    def get_merchant_location(self, merchant_location_key: str) -> dict | None:
+        """存在しない場合は None を返す(呼び出し側が「無ければ作成」を判断できるように例外にしない)。"""
+        response = self._request("GET", f"{INVENTORY_LOCATION_PATH}/{merchant_location_key}")
+        if response.status_code == 404:
+            return None
+        if response.status_code >= 400:
+            raise EbayApiError(f"merchant_location取得に失敗: {response.status_code} {response.text}")
+        return response.json()
+
+    def create_merchant_location(self, merchant_location_key: str, payload: dict) -> None:
+        response = self._request(
+            "POST", f"{INVENTORY_LOCATION_PATH}/{merchant_location_key}", json=payload
+        )
+        if response.status_code >= 400:
+            raise EbayApiError(f"merchant_location作成に失敗: {response.status_code} {response.text}")
+
+    # --- Taxonomy (publish前のカテゴリ必須アスペクト確認に使用。読み取り専用・アプリケーショントークン) ---
+    def get_item_aspects_for_category(self, category_id: str, marketplace_id: str = "EBAY_US") -> list[dict]:
+        tree_data = self._get(
+            TAXONOMY_DEFAULT_TREE_PATH, params={"marketplace_id": marketplace_id}, use_app_token=True
+        )
+        tree_id = tree_data.get("categoryTreeId")
+        if not tree_id:
+            return []
+        data = self._get(
+            TAXONOMY_ASPECTS_PATH.format(tree_id=tree_id),
+            params={"category_id": category_id},
+            use_app_token=True,
+        )
+        return data.get("aspects", [])

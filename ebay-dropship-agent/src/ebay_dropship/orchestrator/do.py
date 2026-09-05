@@ -37,6 +37,7 @@ from decimal import Decimal
 from typing import Any
 
 from ebay_dropship.adapters.ebay import EbayApiError, EbayClient, EbayOfferAlreadyExistsError
+from ebay_dropship.adapters.ebay.taxonomy import complete_required_aspects, required_aspect_names
 from ebay_dropship.approval import Proposal, ProposalStatus, ProposalType
 from ebay_dropship.config import Settings
 from ebay_dropship.guardrails import ComplianceError, GuardrailResult, check_supplier_data_freshness
@@ -61,12 +62,21 @@ def _inventory_item_payload(payload: Mapping[str, Any]) -> dict:
     }
 
 
-def _offer_payload(payload: Mapping[str, Any]) -> dict:
+def _offer_payload(payload: Mapping[str, Any], settings: Settings) -> dict:
+    # listingPolicies/merchantLocationKey は `sandbox setup-selling` が .env に書き込んだ値を使う。
+    # 未設定(空文字)のポリシーは省略する(eBay側で「値なし」と「無効なID」を区別させないため)。
+    listing_policies = {}
+    if settings.ebay_fulfillment_policy_id:
+        listing_policies["fulfillmentPolicyId"] = settings.ebay_fulfillment_policy_id
+    if settings.ebay_payment_policy_id:
+        listing_policies["paymentPolicyId"] = settings.ebay_payment_policy_id
+    if settings.ebay_return_policy_id:
+        listing_policies["returnPolicyId"] = settings.ebay_return_policy_id
     return {
         "categoryId": payload.get("category_id"),
         "pricingSummary": {"price": {"value": str(payload.get("list_price")), "currency": "USD"}},
-        "listingPolicies": {},
-        "merchantLocationKey": "default",
+        "listingPolicies": listing_policies,
+        "merchantLocationKey": settings.ebay_merchant_location_key or "default",
         "availableQuantity": 1,
     }
 
@@ -91,12 +101,22 @@ def execute_publish(
         if dry_run:
             payload["dry_run_preview"] = {
                 "inventory_item_request": _inventory_item_payload(payload),
-                "offer_request": _offer_payload(payload),
+                "offer_request": _offer_payload(payload, settings),
             }
             repository.update_payload(p.id, payload)
             return
 
         if "ebay_item_id" not in payload:
+            # カテゴリ必須アスペクトの自動補完(Taxonomy API)。ベストエフォート: 取得に失敗しても
+            # 既存の item_specifics のまま publish 自体は試みる(dry_run はネットワーク無しを維持する
+            # ため、ここは live 実行時のみ)。
+            try:
+                aspects = ebay_client.get_item_aspects_for_category(payload.get("category_id"))
+                payload["item_specifics"] = complete_required_aspects(
+                    payload.get("item_specifics") or {}, required_aspect_names(aspects)
+                )
+            except EbayApiError:
+                pass
             try:
                 ebay_client.create_or_update_inventory_item(sku, _inventory_item_payload(payload))
             except EbayApiError as exc:
@@ -107,7 +127,7 @@ def execute_publish(
 
         if "ebay_offer_id" not in payload:
             try:
-                offer = ebay_client.create_offer(sku, _offer_payload(payload))
+                offer = ebay_client.create_offer(sku, _offer_payload(payload, settings))
                 payload["ebay_offer_id"] = offer["offerId"]
             except EbayOfferAlreadyExistsError as exc:
                 payload["ebay_offer_id"] = exc.existing_offer_id

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 
 import httpx
 import pytest
@@ -24,11 +25,30 @@ from ebay_dropship.store import (
 
 
 class SandboxFakeBackend:
-    """Inventory(publish)+Fulfillment(getOrders)+Analytics(getRateLimits)をまとめて再現するフェイク。"""
+    """Inventory(publish)+Fulfillment(getOrders)+Analytics(getRateLimits)をまとめて再現するフェイク。
+
+    setup-selling(Account API opt_in/ポリシー、Inventory location)とTaxonomy(必須アスペクト)も
+    最小限再現する。ポリシー/ロケーションは辞書に保持し、CLIを複数回呼んでも冪等に振る舞う
+    (実Sandboxの「無ければ作成・有れば再利用」を模す)。
+    """
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
         self.fail_auth = False
+        self.already_opted_in = False
+        self._policies: dict[str, list[dict]] = {"payment": [], "return": [], "fulfillment": []}
+        self._policy_id_fields = {
+            "payment": "paymentPolicyId",
+            "return": "returnPolicyId",
+            "fulfillment": "fulfillmentPolicyId",
+        }
+        self._locations: dict[str, dict] = {}
+        self._next_policy_seq = 1
+        self.last_inventory_item_body: dict | None = None
+        self.last_offer_body: dict | None = None
+        # category_id=9355 の必須アスペクト。"Brand"はseed-test-item側で常に指定されるため
+        # ここでは指定漏れになりがちな"Type"だけを必須にして、自動補完の検証をしやすくする。
+        self.required_aspects_by_category = {"9355": ["Type"]}
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -40,10 +60,12 @@ class SandboxFakeBackend:
             return httpx.Response(200, json={"access_token": "fake-sandbox-token", "expires_in": 7200})
 
         if path.startswith("/sell/inventory/v1/inventory_item/") and request.method == "PUT":
+            self.last_inventory_item_body = json.loads(request.content)
             return httpx.Response(204)
 
         if path == "/sell/inventory/v1/offer" and request.method == "POST":
             body = json.loads(request.content)
+            self.last_offer_body = body
             return httpx.Response(201, json={"offerId": f"offer-{body['sku']}"})
 
         if path.endswith("/publish") and request.method == "POST":
@@ -76,6 +98,50 @@ class SandboxFakeBackend:
                     ]
                 },
             )
+
+        if path == "/sell/account/v1/program/opt_in" and request.method == "POST":
+            if self.already_opted_in:
+                return httpx.Response(400, json={"errors": [{"errorId": 20404, "message": "already opted in"}]})
+            self.already_opted_in = True
+            return httpx.Response(200)
+
+        for kind, list_path in (
+            ("payment", "/sell/account/v1/payment_policy"),
+            ("return", "/sell/account/v1/return_policy"),
+            ("fulfillment", "/sell/account/v1/fulfillment_policy"),
+        ):
+            if path == list_path and request.method == "GET":
+                key = {"payment": "paymentPolicies", "return": "returnPolicies", "fulfillment": "fulfillmentPolicies"}[
+                    kind
+                ]
+                return httpx.Response(200, json={key: self._policies[kind]})
+            if path == list_path and request.method == "POST":
+                body = json.loads(request.content)
+                policy_id = f"{kind}-policy-{self._next_policy_seq}"
+                self._next_policy_seq += 1
+                id_field = self._policy_id_fields[kind]
+                self._policies[kind].append({**body, id_field: policy_id})
+                return httpx.Response(201, json={id_field: policy_id})
+
+        if path.startswith("/sell/inventory/v1/location/"):
+            location_key = path.rsplit("/", 1)[-1]
+            if request.method == "GET":
+                location = self._locations.get(location_key)
+                return httpx.Response(200, json=location) if location else httpx.Response(404)
+            if request.method == "POST":
+                self._locations[location_key] = json.loads(request.content)
+                return httpx.Response(204)
+
+        if path == "/commerce/taxonomy/v1/get_default_category_tree_id" and request.method == "GET":
+            return httpx.Response(200, json={"categoryTreeId": "0"})
+
+        if path == "/commerce/taxonomy/v1/category_tree/0/get_item_aspects_for_category" and request.method == "GET":
+            category_id = request.url.params.get("category_id")
+            required = self.required_aspects_by_category.get(category_id, [])
+            aspects = [
+                {"localizedAspectName": name, "aspectConstraint": {"aspectRequired": True}} for name in required
+            ]
+            return httpx.Response(200, json={"aspects": aspects})
 
         return httpx.Response(404)
 
@@ -120,6 +186,7 @@ def _patch_from_settings(monkeypatch, backend: SandboxFakeBackend) -> None:
         ["sandbox", "rate-limits"],
         ["sandbox", "get-orders"],
         ["sandbox", "execute-publish", "dummy-id"],
+        ["sandbox", "setup-selling"],
     ],
 )
 def test_sandbox_commands_refuse_when_env_is_production(cli_db, monkeypatch, args):
@@ -225,6 +292,91 @@ def test_seed_then_execute_publish_live_actually_calls_sandbox_fake(cli_db, back
     assert ("POST", "/sell/inventory/v1/offer") in backend.calls
     assert any(method == "POST" and path.endswith("/publish") for method, path in backend.calls)
     assert "実行完了" in result.output
+    # C: category_id=9355の必須アスペクト"Type"がTaxonomy経由で自動補完されている(seed時は未指定)。
+    assert backend.last_inventory_item_body["product"]["aspects"]["Type"] == ["Unbranded"]
+    assert backend.last_inventory_item_body["product"]["aspects"]["Brand"] == ["Acme"]  # 既存指定は上書きしない
+
+
+def test_execute_publish_live_injects_listing_policies_and_merchant_location_from_settings(
+    cli_db, backend, monkeypatch
+):
+    monkeypatch.setattr(settings, "ebay_payment_policy_id", "payment-policy-from-env")
+    monkeypatch.setattr(settings, "ebay_return_policy_id", "return-policy-from-env")
+    monkeypatch.setattr(settings, "ebay_fulfillment_policy_id", "fulfillment-policy-from-env")
+    monkeypatch.setattr(settings, "ebay_merchant_location_key", "warehouse-1")
+    _patch_from_settings(monkeypatch, backend)
+    runner = CliRunner()
+    seed_result = runner.invoke(
+        cli, ["sandbox", "seed-test-item", "--category-id", "9355", "--sku", "SANDBOX-TEST-POLICY"]
+    )
+    proposal_id = seed_result.output.splitlines()[0].split(": ")[1]
+    runner.invoke(cli, ["proposals", "approve", proposal_id, "--by", "tester"])
+
+    result = runner.invoke(cli, ["sandbox", "execute-publish", proposal_id, "--live"])
+
+    assert result.exit_code == 0, result.output
+    assert backend.last_offer_body["listingPolicies"] == {
+        "fulfillmentPolicyId": "fulfillment-policy-from-env",
+        "paymentPolicyId": "payment-policy-from-env",
+        "returnPolicyId": "return-policy-from-env",
+    }
+    assert backend.last_offer_body["merchantLocationKey"] == "warehouse-1"
+
+
+def test_execute_publish_dry_run_preview_reflects_configured_listing_policies(cli_db, backend, monkeypatch):
+    monkeypatch.setattr(settings, "ebay_payment_policy_id", "payment-policy-from-env")
+    _patch_from_settings(monkeypatch, backend)
+    runner = CliRunner()
+    seed_result = runner.invoke(cli, ["sandbox", "seed-test-item", "--category-id", "9355"])
+    proposal_id = seed_result.output.splitlines()[0].split(": ")[1]
+    runner.invoke(cli, ["proposals", "approve", proposal_id, "--by", "tester"])
+
+    result = runner.invoke(cli, ["sandbox", "execute-publish", proposal_id])
+
+    assert result.exit_code == 0
+    assert "payment-policy-from-env" in result.output
+
+
+# --- setup-selling ---
+
+
+def test_setup_selling_first_run_creates_policies_and_location_and_masks_ids(cli_db, backend, monkeypatch):
+    _patch_from_settings(monkeypatch, backend)
+    with tempfile.TemporaryDirectory() as tmp:
+        env_path = f"{tmp}/.env"
+        runner = CliRunner()
+
+        result = runner.invoke(cli, ["sandbox", "setup-selling", "--env-file", env_path])
+
+        assert result.exit_code == 0, result.output
+        assert "新規作成" in result.output
+        with open(env_path, encoding="utf-8") as f:
+            content = f.read()
+        assert "EBAY_PAYMENT_POLICY_ID=payment-policy-1" in content
+        assert "EBAY_RETURN_POLICY_ID=return-policy-2" in content
+        assert "EBAY_FULFILLMENT_POLICY_ID=fulfillment-policy-3" in content
+        assert "EBAY_MERCHANT_LOCATION_KEY=default" in content
+        # policyId自体はマスクされ、生の値は出力に出ない(先頭数文字のみ許容)。
+        assert "payment-policy-1" not in result.output
+
+
+def test_setup_selling_is_idempotent_on_second_run(cli_db, backend, monkeypatch):
+    _patch_from_settings(monkeypatch, backend)
+    with tempfile.TemporaryDirectory() as tmp:
+        env_path = f"{tmp}/.env"
+        runner = CliRunner()
+        first = runner.invoke(cli, ["sandbox", "setup-selling", "--env-file", env_path])
+        assert first.exit_code == 0, first.output
+
+        second = runner.invoke(cli, ["sandbox", "setup-selling", "--env-file", env_path])
+
+        assert second.exit_code == 0, second.output
+        assert "既存を再利用" in second.output
+        assert "既にオプトイン済み" in second.output
+        # 2回目で重複作成されていない(list呼び出しは1件ずつしか返らない=バックエンド側で重複が無い)。
+        assert len(backend._policies["payment"]) == 1
+        assert len(backend._policies["return"]) == 1
+        assert len(backend._policies["fulfillment"]) == 1
 
 
 def test_execute_publish_unknown_proposal_id_fails_cleanly(cli_db, backend, monkeypatch):
