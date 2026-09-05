@@ -321,6 +321,26 @@ def test_execute_publish_live_injects_listing_policies_and_merchant_location_fro
         "returnPolicyId": "return-policy-from-env",
     }
     assert backend.last_offer_body["merchantLocationKey"] == "warehouse-1"
+    # errorId 25709 "Invalid value for marketplaceId.": createOfferのbodyにmarketplaceId/formatが必須。
+    assert backend.last_offer_body["marketplaceId"] == "EBAY_US"
+    assert backend.last_offer_body["format"] == "FIXED_PRICE"
+    assert backend.last_offer_body["sku"] == "SANDBOX-TEST-POLICY"
+
+
+def test_execute_publish_live_uses_configured_marketplace_id_in_offer_body(cli_db, backend, monkeypatch):
+    monkeypatch.setattr(settings, "ebay_marketplace_id", "EBAY_GB")
+    _patch_from_settings(monkeypatch, backend)
+    runner = CliRunner()
+    seed_result = runner.invoke(
+        cli, ["sandbox", "seed-test-item", "--category-id", "9355", "--sku", "SANDBOX-TEST-MKT"]
+    )
+    proposal_id = seed_result.output.splitlines()[0].split(": ")[1]
+    runner.invoke(cli, ["proposals", "approve", proposal_id, "--by", "tester"])
+
+    result = runner.invoke(cli, ["sandbox", "execute-publish", proposal_id, "--live"])
+
+    assert result.exit_code == 0, result.output
+    assert backend.last_offer_body["marketplaceId"] == "EBAY_GB"
 
 
 def test_execute_publish_dry_run_preview_reflects_configured_listing_policies(cli_db, backend, monkeypatch):
@@ -335,6 +355,10 @@ def test_execute_publish_dry_run_preview_reflects_configured_listing_policies(cl
 
     assert result.exit_code == 0
     assert "payment-policy-from-env" in result.output
+    # dry-runのプレビューにもmarketplaceId/formatが反映されていること(ネットワーク呼び出しは増やさない)。
+    assert "'marketplaceId': 'EBAY_US'" in result.output
+    assert "'format': 'FIXED_PRICE'" in result.output
+    assert backend.calls == []
 
 
 # --- setup-selling ---

@@ -63,8 +63,12 @@ def _inventory_item_payload(payload: Mapping[str, Any]) -> dict:
 
 
 def _offer_payload(payload: Mapping[str, Any], settings: Settings) -> dict:
-    # listingPolicies/merchantLocationKey は `sandbox setup-selling` が .env に書き込んだ値を使う。
-    # 未設定(空文字)のポリシーは省略する(eBay側で「値なし」と「無効なID」を区別させないため)。
+    # listingPolicies/merchantLocationKey/marketplaceId は `sandbox setup-selling` が .env に
+    # 書き込んだ値、またはmarketplaceの既定設定値を使う。未設定(空文字)のポリシーは省略する
+    # (eBay側で「値なし」と「無効なID」を区別させないため)。
+    # marketplaceId・format はcreateOfferの必須フィールド(errorId 25709 "Invalid value for
+    # marketplaceId."の原因だった。実Sandbox疎通で確認済み)。ヘッダーのmarketplace指定だけでは
+    # 不足しており、body自体に含める必要がある。
     listing_policies = {}
     if settings.ebay_fulfillment_policy_id:
         listing_policies["fulfillmentPolicyId"] = settings.ebay_fulfillment_policy_id
@@ -73,6 +77,9 @@ def _offer_payload(payload: Mapping[str, Any], settings: Settings) -> dict:
     if settings.ebay_return_policy_id:
         listing_policies["returnPolicyId"] = settings.ebay_return_policy_id
     return {
+        "sku": payload.get("sku"),
+        "marketplaceId": settings.ebay_marketplace_id,
+        "format": "FIXED_PRICE",
         "categoryId": payload.get("category_id"),
         "pricingSummary": {"price": {"value": str(payload.get("list_price")), "currency": "USD"}},
         "listingPolicies": listing_policies,

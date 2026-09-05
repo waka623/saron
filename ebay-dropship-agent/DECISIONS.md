@@ -977,3 +977,39 @@ Content-Language"`が発生。モック(`SandboxFakeBackend`等)はヘッダー�
 **残課題**: 今回追加した2箇所以外の呼び出し(Account API/Taxonomy API/Fulfillment API)で
 同種のヘッダー不足エラーが実Sandboxで判明した場合は、同じ枠組み(再現/失敗テスト→最小修正→green)
 で個別に対応する。
+
+---
+
+## 実Sandbox疎通で判明した差異の修正: createOfferのbodyに`marketplaceId`等が不足(2026-09-05)
+
+**事象**: Content-Languageヘッダー修正後、`execute-publish --live`のcreateOfferで
+`errorId 25709 "Invalid value for marketplaceId."`が発生。`_offer_payload`が組み立てるofferの
+bodyに`marketplaceId`(必須フィールド)が無かった(ヘッダーのmarketplace指定=Browse APIの
+`X-EBAY-C-MARKETPLACE-ID`とは別物で、Inventory APIのcreateOfferはbody側にこのフィールドを
+要求する)。これも実Sandbox疎通で初めて顕在化したモックとの乖離。
+
+**修正内容**(判断ロジックには手を入れていない): `orchestrator/do.py::_offer_payload`に
+以下を追加。
+- `"sku": payload.get("sku")` — dry-runプレビューが実際に送信される内容(clientの
+  `create_offer`が`{**payload, "sku": sku}`でsku引数を上書きするのと同じ値)を正しく表示できるようにした。
+- `"marketplaceId": settings.ebay_marketplace_id` — 今回の直接原因。既存の`EBAY_MARKETPLACE_ID`
+  設定(Content-Languageヘッダー修正時に追加済み)をそのまま流用し、新しい設定項目は増やしていない。
+- `"format": "FIXED_PRICE"` — createOfferのもう1つの必須フィールド(このエージェントは即決価格の
+  固定価格出品のみを扱うため、他フォーマット(オークション等)を切り替える設定は設けず固定値にした)。
+
+`listingPolicies`/`merchantLocationKey`は前回修正済みのため変更なし。dry-run/live共通の
+`_offer_payload`を経由するため、dry-runのプレビュー表示にも`marketplaceId`/`format`がそのまま
+反映される(ネットワーク呼び出しは増えていない)。
+
+**テスト**: `tests/test_cli_sandbox.py`に追加。
+- `test_execute_publish_live_injects_listing_policies_and_merchant_location_from_settings`に
+  `marketplaceId`/`format`/`sku`のアサーションを追加。
+- `test_execute_publish_live_uses_configured_marketplace_id_in_offer_body`(新規): 
+  `EBAY_MARKETPLACE_ID`をカスタム値(`EBAY_GB`)にした場合にofferのbodyへ反映されること。
+- `test_execute_publish_dry_run_preview_reflects_configured_listing_policies`に
+  `marketplaceId`/`format`がdry-runプレビュー文字列に含まれること、かつdry-runは引き続き
+  ネットワーク呼び出しゼロ(`backend.calls == []`)であることのアサーションを追加。
+
+**検証**: 全体テスト`279 passed`(前回の278 + 新規1件、既存2件の拡張)。`ruff check`もクリーン。
+実eBayへの接続は本セッションからは行っていない(ユーザーが`git pull`後に
+`execute-publish --live`を再実行して確認する)。
