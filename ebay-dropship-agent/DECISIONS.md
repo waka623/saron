@@ -1013,3 +1013,70 @@ bodyに`marketplaceId`(必須フィールド)が無かった(ヘッダーのmark
 **検証**: 全体テスト`279 passed`(前回の278 + 新規1件、既存2件の拡張)。`ruff check`もクリーン。
 実eBayへの接続は本セッションからは行っていない(ユーザーが`git pull`後に
 `execute-publish --live`を再実行して確認する)。
+
+---
+
+## eBay Marketplace Account Deletion/Closure 通知エンドポイントを追加(2026-09-05)
+
+**背景**: 本番投入の前提として、eBayはMarketplace Account Deletion/Closure notifications
+(退会/削除通知)を受け取るエンドポイントの登録を要求する。登録時にeBayがGETでチャレンジを
+送り、`challengeResponse = SHA-256(challengeCode + verificationToken + endpoint)`(hex)を
+正しく返せるか検証したうえで、実際の削除通知をPOSTで送るようになる。`EBAY_ENV=sandbox`のまま、
+本番APIコール・publish・実発注は一切行っていない。
+
+**実装内容**(判断ロジック=利益ガード・承認ゲート・卸直送チェックとは無関係の、独立した新機能):
+- `src/ebay_dropship/api/account_deletion.py`(新規): ネットワークI/Oを持たない純粋関数のみ。
+  - `is_valid_verification_token(token)`: eBay公式仕様どおり32〜80文字・英数字と`_`/`-`のみを
+    正規表現で検証する。
+  - `compute_challenge_response(challenge_code, verification_token, endpoint)`:
+    `hashlib.sha256`に`challenge_code`→`verification_token`→`endpoint`の順でUTF-8エンコードした
+    バイト列を`update`し、`hexdigest()`を返す(連結順序を誤ると検証チャレンジに失敗するため、
+    文字列結合ではなく明示的な複数回`update`で順序を担保した)。
+- `src/ebay_dropship/api/__init__.py`:
+  - `GET /ebay/account-deletion?challenge_code=...`: `settings.ebay_deletion_verification_token`/
+    `ebay_deletion_endpoint_url`から値を読み、`ChallengeResponseOut`(pydantic BaseModel、
+    `response_model`指定)経由でFastAPIにシリアライズさせる。手動の文字列連結でJSONを組み立てて
+    いないため、BOM混入等の懸念が無い。token/endpointが未設定または不正な形式の場合は500を返す
+    (deny by default。誤った値でchallengeResponseを計算して見かけ上200を返すことはしない)。
+  - `POST /ebay/account-deletion`: 任意のJSONペイロードを受け取り`logging`に記録するのみ
+    (JSON以外の本文が来ても例外にせず、生のバイト列を文字列化してログに残す)。実データの
+    自動削除等の副作用は一切実装していない(将来実装する場合も、この受信ログ記録とは別に
+    承認フローを設けること、とPRODUCTION_READINESS.mdに明記した)。
+  - **この2エンドポイントは意図的に`require_auth`(HTTP Basic認証)を経由させていない**。
+    eBayのnotificationシステムはBasic認証ヘッダーを送れないため、認証必須にすると登録・通知の
+    どちらも失敗する。`/healthz`と同じ「認証不要な公開エンドポイント」の扱いとし、モジュール
+    冒頭のセキュリティ方針コメントに追記した。外部公開時はこのパスだけをリバースプロキシで
+    通し、他のエンドポイント(`/proposals`等)は引き続き認証・ネットワーク制御で保護する必要が
+    ある旨をPRODUCTION_READINESS.mdに明記した。
+- `config.py`: `ebay_deletion_verification_token`/`ebay_deletion_endpoint_url`(いずれも既定
+  空文字)を追加。`.env.example`にもキー名のみ追記(値は空)。
+
+**テスト**: `tests/test_api_account_deletion.py`(新規18件)。
+- ハッシュ計算が`hashlib.sha256`の素朴な計算と一致すること、連結順序を変えると別の値になること
+- GETが200・`application/json`・BOM無し・期待するchallengeResponse値を返すこと、認証不要で
+  アクセスできること、token/endpoint未設定・不正時に500を返すこと
+- POSTが204を返すこと、認証不要であること、ペイロードがログに記録されること、
+  JSON以外の本文でも例外にならないこと
+- `is_valid_verification_token`の境界値(31/32/80/81文字、空文字、不正文字)
+
+**検証**: 全体テスト`297 passed`(前回の279 + 新規18件)。`ruff check`もクリーン。
+実eBayへの接続・本番APIコール・publish・実発注のいずれも行っていない。`EBAY_ENV`は
+引き続き`sandbox`のまま。
+
+---
+
+## go-live方針の確認(2026-09-05)
+
+**判断**: 本番投入(`EBAY_ENV=production`)は、コード側を本番Ready状態まで作り込んだ後も、
+**実サプライヤー(有料のTopDawg等)の発送体制が実際に整うまで意図的に保留する**。
+理由は、無在庫ドロップシッピングにおいて最悪の事故は「出品・受注は成立したのに実際に
+発送できない」ことであり、これは技術的な作り込み(guardrails・承認ゲート・Sandbox E2E検証)
+だけでは防げない、運用(サプライヤー契約・在庫確保)側の準備が必要なため。
+
+コード側の本番Ready化(account deletion通知の受け口、Content-Language/marketplaceId等の
+実Sandbox疎通で判明した差異修正、setup-sellingによるビジネスポリシー準備)は継続して進めるが、
+`PRODUCTION_READINESS.md`のチェックリストが揃い、かつサプライヤー体制が整うまでは
+`EBAY_ENV=production`への変更・本番での`execute-publish --live`実行のいずれも行わない。
+この方針は`GO_LIVE.md`の段階有効化方針と整合しており、矛盾しない(`GO_LIVE.md`が
+「能力ごとの個別判断」を定め、本エントリが「そもそも本番投入自体をいつ判断するか」の
+前提条件を明確化する位置づけ)。

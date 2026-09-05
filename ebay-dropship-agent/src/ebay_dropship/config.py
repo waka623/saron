@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     ebay_marketplace_id: str = "EBAY_US"
     ebay_content_language: str = "en-US"
 
+    # --- eBay Marketplace Account Deletion/Closure 通知(api/account_deletion.py) ---
+    # eBay開発者ポータルにこのアプリのエンドポイントURLとverificationTokenを登録すると、
+    # eBayがGETでチャレンジを送ってくる(challengeResponse検証)。値は本番投入準備が整うまで空でよい。
+    ebay_deletion_verification_token: str = ""
+    ebay_deletion_endpoint_url: str = ""
+
     supplier_integration_mode: str = "csv"  # csv | api
     supplier_csv_path: str = "./data/supplier_feed.csv"
     supplier_api_base_url: str = ""

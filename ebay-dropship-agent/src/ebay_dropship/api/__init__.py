@@ -21,19 +21,31 @@
   という既存方針を維持)。ページ自体は静的HTML+素のJavaScriptのみ(外部ライブラリ・CDN読み込み無し)で、
   承認/却下は既存の`/proposals/{id}/approve`・`/proposals/{id}/reject`をブラウザから叩くだけ
   ―― サーバ側に新しい判断ロジック・新しい実行経路は一切追加していない。
+- `GET|POST /ebay/account-deletion`: eBay Marketplace Account Deletion/Closure 通知の受信専用
+  エンドポイント(`api/account_deletion.py`にロジック本体)。eBay側はBasic認証ヘッダーを付与できない
+  ため、`/healthz`と同様に意図的に`require_auth`を経由させない(認証不要の公開エンドポイント)。
+  外部公開する場合はこのパスだけをリバースプロキシで通し、他のエンドポイントは引き続き
+  認証・ネットワーク制御で保護すること(PRODUCTION_READINESS.md参照)。POSTは受信内容をログに
+  記録するのみで、実データの自動削除等の副作用は一切行わない(未実装。将来実装する場合も
+  別途承認フローを設けること)。
 """
 
 from __future__ import annotations
 
+import logging
 import secrets
 from decimal import Decimal
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 
+from ebay_dropship.api.account_deletion import (
+    compute_challenge_response,
+    is_valid_verification_token,
+)
 from ebay_dropship.approval import Proposal, RiskLevel
 from ebay_dropship.config import Settings
 from ebay_dropship.config import settings as default_settings
@@ -44,6 +56,8 @@ from ebay_dropship.store import (
     create_engine_from_settings,
     create_session_factory,
 )
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="ebay-dropship-agent 承認API")
 
@@ -139,6 +153,10 @@ class ApproveRequest(BaseModel):
 
 class RejectRequest(BaseModel):
     reason: str
+
+
+class ChallengeResponseOut(BaseModel):
+    challengeResponse: str
 
 
 _UI_PAGE_HTML = """\
@@ -269,6 +287,44 @@ loadProposals();
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/ebay/account-deletion", response_model=ChallengeResponseOut)
+def ebay_account_deletion_challenge(
+    challenge_code: str,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> ChallengeResponseOut:
+    """eBayの検証チャレンジ(GET)。認証不要(eBay側はBasic認証ヘッダーを送れないため)。
+
+    `response_model`(pydantic経由のJSONシリアライズ)を使うため、手動の文字列連結によるBOM混入等の
+    懸念が無い。
+    """
+    verification_token = settings.ebay_deletion_verification_token
+    endpoint = settings.ebay_deletion_endpoint_url
+    if not endpoint or not is_valid_verification_token(verification_token):
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "EBAY_DELETION_VERIFICATION_TOKEN/EBAY_DELETION_ENDPOINT_URLが未設定または不正です"
+                "(.envを確認してください)。"
+            ),
+        )
+    challenge_response = compute_challenge_response(challenge_code, verification_token, endpoint)
+    return ChallengeResponseOut(challengeResponse=challenge_response)
+
+
+@app.post("/ebay/account-deletion", status_code=status.HTTP_204_NO_CONTENT)
+async def ebay_account_deletion_notification(request: Request) -> Response:
+    """実際の削除/退会通知(POST)。認証不要。受信内容をログに記録するのみで、実データの自動削除等の
+
+    副作用は一切行わない(未実装。将来実装する場合も別途承認フローを設けること)。
+    """
+    try:
+        body: Any = await request.json()
+    except Exception:  # noqa: BLE001 - JSON以外/空ボディでも受信ログだけは残す
+        body = (await request.body()).decode("utf-8", errors="replace")
+    logger.info("eBay account deletion notification received: %s", body)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.get("/ui", response_class=HTMLResponse)
