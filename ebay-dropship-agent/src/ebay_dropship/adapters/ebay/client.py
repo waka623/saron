@@ -83,6 +83,8 @@ class EbayClient:
         http_client: httpx.Client | None = None,
         call_budget: CallBudget | None = None,
         retry_sleep: Callable[[float], None] = time.sleep,
+        marketplace_id: str = "EBAY_US",
+        content_language: str = "en-US",
     ):
         self.sandbox = sandbox
         self.base_url = SANDBOX_API_BASE if sandbox else PRODUCTION_API_BASE
@@ -98,6 +100,11 @@ class EbayClient:
         # 5000 は Sell API の代表的な日次上限の目安。実際の値は get_rate_limits() で都度確認する。
         self.call_budget = call_budget or CallBudget(daily_limit=5000)
         self._retry_sleep = retry_sleep
+        # errorId 25709("Invalid value for header Content-Language")等の回避。
+        # Inventory/Offer系の書き込み呼び出しとBrowse APIが要求するヘッダーの値。ハードコードせず
+        # .env(config.Settings)から渡す(marketplace変更時にコード変更不要にするため)。
+        self.marketplace_id = marketplace_id
+        self.content_language = content_language
 
     @classmethod
     def from_settings(cls, settings) -> EbayClient:
@@ -107,6 +114,8 @@ class EbayClient:
             client_secret=settings.ebay_client_secret,
             refresh_token=settings.ebay_refresh_token,
             sandbox=settings.ebay_env != "production",
+            marketplace_id=settings.ebay_marketplace_id,
+            content_language=settings.ebay_content_language,
         )
 
     @property
@@ -120,6 +129,14 @@ class EbayClient:
         token = self._app_auth.get_access_token() if use_app_token else self.get_access_token()
         return {"Authorization": f"Bearer {token}"}
 
+    def _content_language_headers(self) -> dict:
+        """Inventory/Offer系の書き込み呼び出しに必須(未指定だとerrorId 25709)。"""
+        return {"Content-Language": self.content_language}
+
+    def _marketplace_headers(self) -> dict:
+        """Browse API等、X-EBAY-C-MARKETPLACE-IDヘッダーを要求する呼び出し用。"""
+        return {"X-EBAY-C-MARKETPLACE-ID": self.marketplace_id}
+
     def _request(
         self,
         method: str,
@@ -128,22 +145,35 @@ class EbayClient:
         json: dict | None = None,
         params: dict | None = None,
         use_app_token: bool = False,
+        extra_headers: dict | None = None,
     ) -> httpx.Response:
         self.call_budget.record_call()
 
         def do_request() -> httpx.Response:
+            headers = self._authorized_headers(use_app_token=use_app_token)
+            if extra_headers:
+                headers.update(extra_headers)
             return self._http.request(
                 method,
                 f"{self.base_url}{path}",
-                headers=self._authorized_headers(use_app_token=use_app_token),
+                headers=headers,
                 params=params,
                 json=json,
             )
 
         return retry_with_backoff(do_request, sleep=self._retry_sleep)
 
-    def _get(self, path: str, params: dict | None = None, *, use_app_token: bool = False) -> dict:
-        response = self._request("GET", path, params=params, use_app_token=use_app_token)
+    def _get(
+        self,
+        path: str,
+        params: dict | None = None,
+        *,
+        use_app_token: bool = False,
+        extra_headers: dict | None = None,
+    ) -> dict:
+        response = self._request(
+            "GET", path, params=params, use_app_token=use_app_token, extra_headers=extra_headers
+        )
         if response.status_code >= 400:
             raise EbayApiError(f"{path} 呼び出しに失敗: {response.status_code} {response.text}")
         return response.json()
@@ -178,15 +208,23 @@ class EbayClient:
         params: dict = {"q": keywords}
         if category_id:
             params["category_ids"] = category_id
-        data = self._get(BROWSE_SEARCH_PATH, params=params, use_app_token=True)
+        data = self._get(
+            BROWSE_SEARCH_PATH, params=params, use_app_token=True, extra_headers=self._marketplace_headers()
+        )
         return data.get("itemSummaries", [])
 
     # --- Taxonomy (今回未使用。必要になれば同様のパターンで追加) ---
 
     # --- Inventory (Phase 4) ---
     def create_or_update_inventory_item(self, sku: str, payload: dict) -> dict:
-        """PUT は仕様上べき等(同じSKUへの再送は上書きになり重複を生まない)。"""
-        response = self._request("PUT", f"{INVENTORY_ITEM_PATH}/{sku}", json=payload)
+        """PUT は仕様上べき等(同じSKUへの再送は上書きになり重複を生まない)。
+
+        Content-Language ヘッダーが必須(未指定だと errorId 25709 "Invalid value for header
+        Content-Language" になる。実Sandbox疎通で確認済み)。
+        """
+        response = self._request(
+            "PUT", f"{INVENTORY_ITEM_PATH}/{sku}", json=payload, extra_headers=self._content_language_headers()
+        )
         if response.status_code >= 400:
             raise EbayApiError(
                 f"inventory_item({sku}) 更新に失敗: {response.status_code} {response.text}"
@@ -195,7 +233,9 @@ class EbayClient:
 
     def create_offer(self, sku: str, payload: dict) -> dict:
         """既にSKUのofferが存在する場合は EbayOfferAlreadyExistsError を送出する(呼び出し側で冪等に再利用する)。"""
-        response = self._request("POST", OFFER_PATH, json={**payload, "sku": sku})
+        response = self._request(
+            "POST", OFFER_PATH, json={**payload, "sku": sku}, extra_headers=self._content_language_headers()
+        )
         if response.status_code == 400:
             data = response.json() if response.content else {}
             existing_offer_id = _extract_duplicate_offer_id(data)
@@ -206,14 +246,18 @@ class EbayClient:
         return response.json()
 
     def publish_offer(self, offer_id: str) -> dict:
-        response = self._request("POST", f"{OFFER_PATH}/{offer_id}/publish")
+        response = self._request(
+            "POST", f"{OFFER_PATH}/{offer_id}/publish", extra_headers=self._content_language_headers()
+        )
         if response.status_code >= 400:
             raise EbayApiError(f"publish_offer({offer_id}) に失敗: {response.status_code} {response.text}")
         return response.json()
 
     def update_offer(self, offer_id: str, payload: dict) -> dict:
         """PUT は仕様上べき等(同じ内容の再送は同じ結果になる)。price_change 実行に使う。"""
-        response = self._request("PUT", f"{OFFER_PATH}/{offer_id}", json=payload)
+        response = self._request(
+            "PUT", f"{OFFER_PATH}/{offer_id}", json=payload, extra_headers=self._content_language_headers()
+        )
         if response.status_code >= 400:
             raise EbayApiError(f"update_offer({offer_id}) に失敗: {response.status_code} {response.text}")
         return response.json() if response.content else {}
@@ -284,7 +328,10 @@ class EbayClient:
 
     def create_merchant_location(self, merchant_location_key: str, payload: dict) -> None:
         response = self._request(
-            "POST", f"{INVENTORY_LOCATION_PATH}/{merchant_location_key}", json=payload
+            "POST",
+            f"{INVENTORY_LOCATION_PATH}/{merchant_location_key}",
+            json=payload,
+            extra_headers=self._content_language_headers(),
         )
         if response.status_code >= 400:
             raise EbayApiError(f"merchant_location作成に失敗: {response.status_code} {response.text}")

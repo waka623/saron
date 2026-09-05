@@ -50,6 +50,11 @@ access token(2時間)のみを返しrefresh_token(18か月)は返さない。
       `--live` 実行時、指定カテゴリの必須アスペクト(Taxonomy API)のうち item_specifics に無いものは
       プレースホルダ(`Unbranded`等)で自動補完される(ベストエフォート。Taxonomy取得に失敗した場合は
       既存の item_specifics のまま publish を試みる)。
+      2026-09-05: 実Sandbox疎通で`errorId 25709 "Invalid value for header Content-Language"`が判明し
+      修正済み。Inventory/Offer系の書き込み(`inventory_item`/`offer`/`publish`/`update_offer`/
+      `location`)には`.env`の`EBAY_CONTENT_LANGUAGE`(既定`en-US`)を、Browse APIには
+      `EBAY_MARKETPLACE_ID`(既定`EBAY_US`)を`X-EBAY-C-MARKETPLACE-ID`ヘッダーとして送る
+      (DECISIONS.md参照)。
 - [ ] **Inventory / price_change**: 上記で作成したSandbox出品に対し `execute_price_change` を実行し、
       価格変更が反映される(現時点ではCLIコマンド化していない。`execute_price_change`を直接呼ぶ、
       または今後 `sandbox execute-price-change` を追加する)。

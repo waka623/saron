@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     ebay_return_policy_id: str = ""
     ebay_fulfillment_policy_id: str = ""
     ebay_merchant_location_key: str = "default"
+    # Inventory/Offer系の書き込み呼び出しに必須のヘッダー(errorId 25709等の回避)。
+    # marketplaceに対応する値へ変更する場合は、両方をあわせて変更すること(組み合わせが不整合だと
+    # eBay側で別のエラーになりうる)。
+    ebay_marketplace_id: str = "EBAY_US"
+    ebay_content_language: str = "en-US"
 
     supplier_integration_mode: str = "csv"  # csv | api
     supplier_csv_path: str = "./data/supplier_feed.csv"

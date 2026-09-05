@@ -927,3 +927,53 @@ CLI統合テスト)。
 **残課題**: `paymentMethods`省略や`ALREADY_OPTED_IN_ERROR_ID=20404`はeBay公式ドキュメントに基づく
 想定であり、実Sandboxでの実疎通で異なることが判明した場合はTask 3の枠組み(再現/失敗テスト→
 最小修正→green)で修正する。
+
+---
+
+## 実Sandbox疎通で判明した差異の修正: `Content-Language`/`X-EBAY-C-MARKETPLACE-ID`ヘッダー不足(2026-09-05)
+
+**事象**: ユーザーが自分のPCで`execute-publish --live`を実行したところ、
+`createOrReplaceInventoryItem`(PUT inventory_item)で`errorId 25709 "Invalid value for header
+Content-Language"`が発生。モック(`SandboxFakeBackend`等)はヘッダーを検証しないため、
+このコードベースには実装漏れがあってもテストがgreenのままになっていた、実Sandbox疎通で
+初めて顕在化したモックと実APIの乖離(Task 3で想定していたパターンそのもの)。
+
+**修正内容**(判断ロジック=利益ガード・承認ゲート・卸直送チェックには一切手を入れていない):
+
+- `config.py`: `ebay_marketplace_id: str = "EBAY_US"` / `ebay_content_language: str = "en-US"` を追加
+  (ハードコード禁止。marketplace変更時は`.env`の編集のみで対応できるようにする)。
+- `adapters/ebay/client.py`:
+  - `EbayClient.__init__`/`from_settings`が`marketplace_id`/`content_language`を受け取り、
+    `self.marketplace_id`/`self.content_language`として保持するようにした。
+  - `_request`/`_get`に`extra_headers`パラメータを追加(既存の`use_app_token`と同様、呼び出し側が
+    必要なヘッダーだけ明示的に指定する設計。全呼び出しに無条件で付けると不要な箇所にまで
+    ヘッダーが付き、実Sandboxでの別の予期しない挙動を招くリスクがあるため)。
+  - `Content-Language`ヘッダーを付与: `create_or_update_inventory_item`(今回の直接原因)、
+    `create_offer`・`publish_offer`・`update_offer`・`create_merchant_location`
+    (いずれも Inventory API 配下の書き込み呼び出しで、同種のロケール依存フィールドを扱うため
+    同じ要件が課される可能性が高いと判断し、要求どおり「同様に必要な呼び出しにも」広げた)。
+  - `X-EBAY-C-MARKETPLACE-ID`ヘッダーを付与: `search_competitive_listings`(Browse API)。
+    Browse APIはeBay公式ドキュメントでこのヘッダーが必須と明記されている数少ない箇所であり、
+    確度が高いためこの1箇所に絞った。Account API(business policies)・Taxonomy APIは
+    `marketplace_id`をクエリパラメータまたはボディの`marketplaceId`フィールドで渡す方式に
+    既に対応済みのため、ここでは追加のヘッダーを付けていない(重複してヘッダーとパラメータの
+    両方を要求されるとは考えにくいため、確認できていないところへの憶測でのヘッダー追加は避けた)。
+  - opt_in/policy作成(Account API)・merchant location取得(GET)・Taxonomy APIには
+    `Content-Language`を付けていない(書き込みでも英語以外のロケール依存テキストを持たない
+    API、または読み取り専用のため不要と判断)。
+
+**テスト**: `tests/test_ebay_client_headers.py`(新規、10件)。
+- 既定値(`EBAY_US`/`en-US`)がヘッダーに使われること
+- `create_or_update_inventory_item`/`create_offer`/`publish_offer`/`update_offer`/
+  `create_merchant_location`が`Content-Language`を送ること
+- `search_competitive_listings`が`X-EBAY-C-MARKETPLACE-ID`を送ること
+- `marketplace_id`/`content_language`をカスタム値に変更した場合にヘッダーへ反映されること
+- `EbayClient.from_settings`が`Settings`の値(カスタム値・既定値の両方)を正しく引き継ぐこと
+
+**検証**: 全体テスト`278 passed`(前回の268 + 新規10件)。`ruff check`もクリーン。
+実eBayへの接続は本セッションからは行っていない(ユーザーが自分のPCで`git pull`後に
+`execute-publish --live`を再実行して確認する)。
+
+**残課題**: 今回追加した2箇所以外の呼び出し(Account API/Taxonomy API/Fulfillment API)で
+同種のヘッダー不足エラーが実Sandboxで判明した場合は、同じ枠組み(再現/失敗テスト→最小修正→green)
+で個別に対応する。
