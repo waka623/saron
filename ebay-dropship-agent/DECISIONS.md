@@ -778,3 +778,56 @@ green(いずれも`grant_type`やスコープの中身までは検証してお�
 実eBay Sandboxでの最終確認(スコープが実際に受理されるか、refresh_token自体に必要なスコープの
 同意が済んでいるか)はユーザーが自分のPCで`ebay-dropship sandbox check-auth`等を実行し、
 出力を共有した時点で行う。
+
+## `sandbox get-refresh-token`(refresh_token取得ヘルパー)を追加(2026-09-01)
+
+ユーザーから、eBayの「Get a User Token」ツール(開発者ポータル)がaccess token(2時間)のみを
+返しrefresh_token(18か月)を返さないため、authorization codeフローを自前で回してrefresh_tokenを
+取得するCLIヘルパーが欲しいとの依頼を受けた。
+
+- `src/ebay_dropship/adapters/ebay/auth.py`: 純粋なロジック関数を3つ追加(ネットワーク以外の副作用
+  なし、ユニットテストしやすい設計)。
+  - `build_authorization_url(client_id, redirect_uri, sandbox, scopes)`: 認可URLを組み立てる。
+    `SANDBOX_AUTHORIZE_URL`(`auth.sandbox.ebay.com`)/`PRODUCTION_AUTHORIZE_URL`(`auth.ebay.com`)
+    を新規定数化。スコープは既存の`DEFAULT_SCOPES`(前回追加したsell.inventory等5種)を再利用する
+    (ユーザー要望どおり「既存のスコープ定義があれば再利用する」を満たす)。
+  - `extract_authorization_code(redirected_url)`: リダイレクト後のURLから`code`を抽出(URLデコード
+    込み)。eBayが`error`/`error_description`付きで返した場合(同意拒否等)はその内容をそのまま
+    例外メッセージにする。
+  - `exchange_authorization_code_for_refresh_token(http_client, client_id, client_secret, code,
+    redirect_uri, sandbox)`: `grant_type=authorization_code`でトークンURLにPOSTし、レスポンスの
+    dict(`refresh_token`を含む)をそのまま返す。失敗時はeBayの`error`/`error_description`を
+    そのまま例外メッセージにする。`http_client`を引数で受け取る既存パターン(`EbayOAuthClient`等)を
+    踏襲し、実ネットワーク無しでユニットテスト可能にした。
+  - 既存の`EbayOAuthClient`/`EbayApplicationOAuthClient`は無変更。
+- `src/ebay_dropship/envfile.py`(新規): `.env`ファイルの特定キーだけを書き換える最小限のヘルパー
+  `upsert_env_var(path, key, value)`。既存行の中身のみ置換(無ければ追記)し、他の行・コメントは
+  保持する。python-dotenv等の外部ライブラリには依存させず、単純な実装のまま個別にテストできるよう
+  独立モジュールにした。
+- `src/ebay_dropship/cli/__init__.py`: `sandbox get-refresh-token`コマンドを追加(対話式)。
+  - `.env`から`EBAY_CLIENT_ID`/`EBAY_CLIENT_SECRET`/`EBAY_REDIRECT_URI`(RuName)/`EBAY_ENV`を読み、
+    `EBAY_ENV=production`なら`auth.ebay.com`/`api.ebay.com`、それ以外はSandboxのエンドポイントを使う
+    (このコマンドだけは、他の`sandbox`サブコマンドと違い意図的に`_require_sandbox_env`を適用していない
+    ―― ユーザー要望どおり本番用refresh_token取得にも使える汎用ヘルパーとして設計したため)。
+  - 認可URLを画面表示 → リダイレクト後のURL全体を`click.prompt`で受け取る → `code`抽出 →
+    トークン交換 → `upsert_env_var`で`.env`の`EBAY_REFRESH_TOKEN=`を書き換え、という対話フロー。
+  - refresh_token/client_secret/access_tokenは標準出力に一切出さない。成功時は
+    `先頭 v^1.1#... / 長さ NNN文字`という形でマスクした要約のみ表示する
+    (eBayのrefresh_tokenは`v^1.1#`という6文字の版数プレフィックスを持つ形式が一般的で、
+    この6文字だけの露出はリスクが無い)。
+  - `--env-file`オプション(既定`.env`)でテスト時に別ファイルを指定できるようにした。
+
+**テスト**: `tests/test_ebay_refresh_token_flow.py`(11件、純粋ロジック単体)+
+`tests/test_cli_sandbox_get_refresh_token.py`(5件、`httpx.Client`をローカルフェイクに差し替えた
+CLI統合テスト)。
+- URL組み立て(Sandbox/production切り替え、必須パラメータの中身)
+- code抽出(正常系のURLデコード、eBayエラー時、code欠落時)
+- トークン交換(成功時のrefresh_token取得、失敗時のeBayエラーそのままの表示)
+- `.env`書き込み(新規作成・既存行の置換・他行の保持・キー未存在時の追記)
+- CLI統合: 対話入力からの一連の流れが`.env`に正しく反映されること、出力にトークン値が一切
+  含まれないこと(先頭6文字とマスク文言のみ)、`EBAY_ENV=production`ではproduction側のホストを
+  使うこと、認証情報未設定・同意拒否・トークン交換失敗の各エラーがクリーンに終了すること
+
+**検証**: 全体テスト`242 passed`(前回の226 + 新規16件)。`ruff check`もクリーン。
+`--help`表示も確認済み。実eBayへの接続は本セッションからは行っていない(引き続きユーザーが
+自分のPCで実行し、結果を共有する前提)。

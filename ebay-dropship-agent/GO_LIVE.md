@@ -27,6 +27,12 @@
 `ebay-dropship sandbox ...`(2026-08-31追加)が各項目を実行するCLIコマンドを提供する
 (`EBAY_ENV=production`では全コマンドを拒否するSandbox専用。トークン自体は出力しない)。
 
+**`EBAY_REFRESH_TOKEN`がまだ無い場合**: eBayの「Get a User Token」ツール(開発者ポータル)は
+access token(2時間)のみを返しrefresh_token(18か月)は返さない。
+`ebay-dropship sandbox get-refresh-token` がauthorization codeフローを対話的に実行し、
+取得したrefresh_tokenを`.env`の`EBAY_REFRESH_TOKEN=`に自動保存する
+(このコマンドのみ`EBAY_ENV`に応じてSandbox/production両対応。トークン値は出力しない)。
+
 - [ ] **OAuth**: `ebay-dropship sandbox check-auth` がトークンを取得できる
       (`adapters/ebay/auth.py`。テストは `tests/test_ebay_auth.py` で仕組みをモック検証済み)。
 - [ ] **Inventory / publish**: `ebay-dropship sandbox seed-test-item --category-id <実際のSandboxカテゴリID>` →

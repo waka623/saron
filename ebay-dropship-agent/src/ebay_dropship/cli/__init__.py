@@ -7,11 +7,13 @@
     ebay-dropship cycle run-once [--demo]
     ebay-dropship demo seed
     ebay-dropship sandbox check-auth / get-orders / rate-limits / seed-test-item / execute-publish
+    ebay-dropship sandbox get-refresh-token
     ebay-dropship api serve
 
 `--demo`/`demo seed` は実キー・実発注を一切使わないデモ専用の経路(README「Quickstart(デモ)」参照)。
-`sandbox` サブコマンドは.envに設定した実eBay Sandboxキーを使って実際に疎通する(EBAY_ENV=production
-では実行を拒否する。Sandbox専用)。
+`sandbox` サブコマンドは.envに設定した実eBay Sandboxキーを使って実際に疎通する(`get-refresh-token`を
+除きEBAY_ENV=productionでは実行を拒否するSandbox専用。`get-refresh-token`はrefresh_token取得の
+汎用ヘルパーとしてSandbox/production両対応)。
 """
 
 from __future__ import annotations
@@ -337,6 +339,78 @@ def sandbox_execute_publish(proposal_id: str, live: bool, calls_remaining: int) 
         click.echo(f"  ebay_item_id={result.payload.get('ebay_item_id')}")
         click.echo(f"  ebay_offer_id={result.payload.get('ebay_offer_id')}")
         click.echo(f"  ebay_listing_id={result.payload.get('ebay_listing_id')}")
+
+
+@sandbox.command("get-refresh-token")
+@click.option(
+    "--env-file",
+    "env_file",
+    default=".env",
+    show_default=True,
+    help="refresh_tokenを書き込む.envファイルのパス。",
+)
+def sandbox_get_refresh_token(env_file: str) -> None:
+    """authorization codeフローを対話的に実行し、refresh_tokenを取得して.envに保存する。
+
+    eBayの「Get a User Token」ツール(開発者ポータル)はaccess token(2時間)のみを返し、
+    refresh_token(18か月)を返さないため、このコマンドでauthorization codeフローを自前で実行する。
+    `EBAY_ENV`に応じてSandbox/production双方のエンドポイントを切り替える。
+    トークン自体は出力しない(先頭の一部と長さのみ表示)。
+    """
+    import httpx
+
+    from ebay_dropship.adapters.ebay.auth import (
+        DEFAULT_SCOPES,
+        EbayAuthError,
+        build_authorization_url,
+        exchange_authorization_code_for_refresh_token,
+        extract_authorization_code,
+    )
+    from ebay_dropship.envfile import upsert_env_var
+
+    if not settings.ebay_client_id or not settings.ebay_client_secret or not settings.ebay_redirect_uri:
+        raise click.ClickException(
+            "EBAY_CLIENT_ID / EBAY_CLIENT_SECRET / EBAY_REDIRECT_URI(RuName)を.envに設定してください。"
+        )
+
+    is_sandbox = settings.ebay_env != "production"
+    auth_url = build_authorization_url(
+        settings.ebay_client_id, settings.ebay_redirect_uri, sandbox=is_sandbox, scopes=DEFAULT_SCOPES
+    )
+    click.echo("以下のURLをブラウザで開き、eBayアカウント(Sandboxならテストユーザー)でサインインして")
+    click.echo("同意してください。同意後にリダイレクトされたページのURLを全体をコピーしてください。")
+    click.echo("")
+    click.echo(auth_url)
+    click.echo("")
+    redirected_url = click.prompt("リダイレクト後のURL全体を貼り付けてください")
+
+    try:
+        code = extract_authorization_code(redirected_url)
+    except EbayAuthError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    http_client = httpx.Client(timeout=10.0)
+    try:
+        token_data = exchange_authorization_code_for_refresh_token(
+            http_client,
+            settings.ebay_client_id,
+            settings.ebay_client_secret,
+            code,
+            settings.ebay_redirect_uri,
+            sandbox=is_sandbox,
+        )
+    except EbayAuthError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    refresh_token = token_data.get("refresh_token")
+    if not refresh_token:
+        raise click.ClickException("レスポンスにrefresh_tokenが含まれていません(要求スコープ不足の可能性があります)。")
+
+    upsert_env_var(env_file, "EBAY_REFRESH_TOKEN", refresh_token)
+    click.echo(
+        f"{env_file} に EBAY_REFRESH_TOKEN を保存しました"
+        f"(先頭 {refresh_token[:6]}... / 長さ {len(refresh_token)}文字。値自体は表示しません)。"
+    )
 
 
 @cli.group()
