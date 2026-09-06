@@ -42,7 +42,8 @@ class Settings(BaseSettings):
     enable_automated_supplier_purchase: bool = False
 
     # 金額・率は Decimal 固定(float禁止)。pydantic-settings は .env の文字列から Decimal へ直接変換する。
-    target_margin_pct: Decimal = Decimal(20)
+    # 2026-09-06: 経営判断により20%→15%へ引き下げ(DECISIONS.md参照)。min_net_profit($5)は不変。
+    target_margin_pct: Decimal = Decimal(15)
     min_net_profit: Decimal = Decimal("5.0")
     excluded_categories: str = (
         "luxury_brand_goods,authentication_required,hazmat,"

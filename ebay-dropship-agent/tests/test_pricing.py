@@ -30,7 +30,7 @@ from ebay_dropship.pricing.models import ListingSnapshot
 from ebay_dropship.supplier import SupplierStock
 from tests.fakes.supplier_fake import FakeSupplierAdapter
 
-SETTINGS = Settings(min_net_profit=Decimal("5.0"))  # target_margin_pct=20(既定)
+SETTINGS = Settings(min_net_profit=Decimal("5.0"))  # target_margin_pct=15(既定、2026-09-06〜)
 FEE_PCT = Decimal(13)
 NOW = datetime(2026, 8, 29, 12, 0, 0, tzinfo=UTC)
 

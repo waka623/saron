@@ -14,7 +14,7 @@ from ebay_dropship.config import Settings
 from ebay_dropship.research import evaluate_candidate
 from ebay_dropship.research.models import MarketSnapshot, SupplierProduct
 
-SETTINGS = Settings()  # target_margin_pct=20 / min_net_profit=5(ユーザー確定値)
+SETTINGS = Settings()  # target_margin_pct=15(2026-09-06〜) / min_net_profit=5(不変)
 FEE_PCT = Decimal(13)
 
 
@@ -98,6 +98,33 @@ def test_rejects_when_competition_is_excessive_despite_sufficient_profit():
     assert proposal.proposal_type == ProposalType.NONE
     assert proposal.payload["recommended"] is False
     assert proposal.payload["competition"] == "high"
+
+
+# --- 利益ガード閾値引き下げ(20%→15%、2026-09-06)の回帰テスト ---
+
+
+def test_recommends_when_margin_is_between_new_and_old_threshold():
+    """利益率17%(15%以上・20%未満)の候補: 新基準(15%)ではHOLD採用になる。"""
+    product = _product(cost=Decimal("30.00"))
+    market = _market(median_price=Decimal("50.00"), shipping_cost=Decimal("5.00"))
+
+    proposal = evaluate_candidate(product, market, settings=SETTINGS, fee_pct=FEE_PCT)
+
+    assert proposal.proposal_type == ProposalType.HOLD
+    assert proposal.estimated_profit == Decimal("8.50")  # margin = 8.50/50*100 = 17.0%
+    assert proposal.payload["recommended"] is True
+
+
+def test_same_margin_would_have_been_rejected_under_previous_20_percent_threshold():
+    """同じ候補(利益率17%)が旧基準(target_margin_pct=20)だとNONEだったことを明示する。"""
+    product = _product(cost=Decimal("30.00"))
+    market = _market(median_price=Decimal("50.00"), shipping_cost=Decimal("5.00"))
+    previous_settings = Settings(target_margin_pct=Decimal(20), min_net_profit=SETTINGS.min_net_profit)
+
+    proposal = evaluate_candidate(product, market, settings=previous_settings, fee_pct=FEE_PCT)
+
+    assert proposal.proposal_type == ProposalType.NONE
+    assert proposal.payload["recommended"] is False
 
 
 def test_holds_for_excluded_category():
