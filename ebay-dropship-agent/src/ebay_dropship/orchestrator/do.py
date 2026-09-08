@@ -1,10 +1,14 @@
 """Phase 4/5: 承認済み proposal の実行(Do)。
 
 このモジュールが `guardrails.gateway.execute_side_effect` の executor として実際に
-eBay Sell API(Inventory)の書き込みメソッドを呼ぶ、唯一の場所である
+販路(`channels.base.SalesChannel`。S0以前はeBay固定だったが、`channels/`導入によりeBay/将来の
+Shopify等を差し替え可能にした。DECISIONS.md参照)の書き込みメソッドを呼ぶ、唯一の場所である
 (`tests/test_guardrail_gateway.py::test_ebay_write_methods_are_only_called_through_guardrail_gateway`
-の許可リストに本ファイルが含まれる)。purchaseの発注実行(`orders/purchase_channel.py`)も同様にここが
-唯一の接続点。
+の許可リストに本ファイルと`channels/ebay.py`が含まれる)。purchaseの発注実行
+(`orders/purchase_channel.py`)も同様にここが唯一の接続点。
+
+S0時点では`channel`引数に渡すのは実質`channels.ebay.EbayChannel`のみ(ロジック・挙動は
+リファクタ前のeBay直呼びと完全に同一。`EbayChannel`は`EbayClient`への薄い委譲のみ)。
 
 スコープの切り分け: このモジュールは「承認済みproposalを実行するだけ」。
 どの価格にするか・出品すべきか・発注してよいかの判断は research/listing/pricing/orders の仕事であり、
@@ -36,9 +40,10 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from ebay_dropship.adapters.ebay import EbayApiError, EbayClient, EbayOfferAlreadyExistsError
+from ebay_dropship.adapters.ebay import EbayApiError, EbayOfferAlreadyExistsError
 from ebay_dropship.adapters.ebay.taxonomy import complete_required_aspects, required_aspect_names
 from ebay_dropship.approval import Proposal, ProposalStatus, ProposalType
+from ebay_dropship.channels.base import SalesChannel
 from ebay_dropship.config import Settings
 from ebay_dropship.guardrails import ComplianceError, GuardrailResult, check_supplier_data_freshness
 from ebay_dropship.guardrails.gateway import GuardrailDenied, execute_side_effect
@@ -92,7 +97,7 @@ def execute_publish(
     proposal: Proposal,
     *,
     repository: SqlProposalRepository,
-    ebay_client: EbayClient,
+    channel: SalesChannel,
     settings: Settings,
     calls_remaining: int,
     dry_run: bool = False,
@@ -118,14 +123,14 @@ def execute_publish(
             # 既存の item_specifics のまま publish 自体は試みる(dry_run はネットワーク無しを維持する
             # ため、ここは live 実行時のみ)。
             try:
-                aspects = ebay_client.get_item_aspects_for_category(payload.get("category_id"))
+                aspects = channel.get_item_aspects_for_category(payload.get("category_id"))
                 payload["item_specifics"] = complete_required_aspects(
                     payload.get("item_specifics") or {}, required_aspect_names(aspects)
                 )
             except EbayApiError:
                 pass
             try:
-                ebay_client.create_or_update_inventory_item(sku, _inventory_item_payload(payload))
+                channel.create_or_update_inventory_item(sku, _inventory_item_payload(payload))
             except EbayApiError as exc:
                 repository.mark_failed(p.id, decided_by="orchestrator", reason=f"inventory_item失敗: {exc}")
                 raise
@@ -134,7 +139,7 @@ def execute_publish(
 
         if "ebay_offer_id" not in payload:
             try:
-                offer = ebay_client.create_offer(sku, _offer_payload(payload, settings))
+                offer = channel.create_offer(sku, _offer_payload(payload, settings))
                 payload["ebay_offer_id"] = offer["offerId"]
             except EbayOfferAlreadyExistsError as exc:
                 payload["ebay_offer_id"] = exc.existing_offer_id
@@ -150,7 +155,7 @@ def execute_publish(
         # AlreadyClaimedError が送出され、publish_offer は一切呼ばれない。
         try:
             with repository.claimed_execution(p.id, decided_by="orchestrator"):
-                result = ebay_client.publish_offer(payload["ebay_offer_id"])
+                result = channel.publish_offer(payload["ebay_offer_id"])
                 payload["ebay_listing_id"] = result.get("listingId")
                 repository.update_payload(p.id, payload)
         except AlreadyClaimedError:
@@ -175,7 +180,7 @@ def execute_price_change(
     proposal: Proposal,
     *,
     repository: SqlProposalRepository,
-    ebay_client: EbayClient,
+    channel: SalesChannel,
     settings: Settings,
     calls_remaining: int,
     dry_run: bool = False,
@@ -209,7 +214,7 @@ def execute_price_change(
         # claimed_execution(SAVEPOINT)で直列化する。
         try:
             with repository.claimed_execution(p.id, decided_by="orchestrator"):
-                ebay_client.update_offer(
+                channel.update_offer(
                     offer_id,
                     {"pricingSummary": {"price": {"value": str(proposed_price), "currency": "USD"}}},
                 )
@@ -369,7 +374,7 @@ class WithdrawNotImplementedError(Exception):
 def run_do(
     *,
     repository: SqlProposalRepository,
-    ebay_client: EbayClient,
+    channel: SalesChannel,
     settings: Settings,
     calls_remaining: int,
     dry_run: bool = False,
@@ -392,7 +397,7 @@ def run_do(
                     execute_publish(
                         proposal,
                         repository=repository,
-                        ebay_client=ebay_client,
+                        channel=channel,
                         settings=settings,
                         calls_remaining=calls_remaining,
                         dry_run=dry_run,
@@ -403,7 +408,7 @@ def run_do(
                     execute_price_change(
                         proposal,
                         repository=repository,
-                        ebay_client=ebay_client,
+                        channel=channel,
                         settings=settings,
                         calls_remaining=calls_remaining,
                         dry_run=dry_run,

@@ -1106,3 +1106,74 @@ TopDawgの推定利益は判定に使わない。
 「実際にSold価格を反映した相場データ」を保証しない(呼び出し側が渡す値が実売データかMSRP由来かは
 コードからは区別できない)。実装として反映する場合は、別途「相場データが実Sold価格由来である
 ことを保証・検証する」変更が必要になる点に留意する。
+
+---
+
+## S0: 販路差し替え可能設計への移行(SalesChannel抽象の導入。2026-09-06)
+
+戦略転換: eBayは採算困難と判断。完成したeBayエージェントは保全し、共通の心臓部(利益ガード/承認/
+PDCA/orchestrator)を流用してShopify版を別チャネルとして構築する。S0で SalesChannel 抽象を導入し
+eBayをその裏へ(挙動不変・全テストgreen)。Shopify特有事情: 市場相場APIが無いため利益ガードは
+自己設定価格ベースに簡素化、需要/競合の自動判定と集客はコード外。
+
+**S0のスコープ**: `SalesChannel`インターフェースの導入とeBayのラップのみ。Shopifyの実装は行わない
+(`channels/shopify.py`は全メソッドが`NotImplementedError`のスタブ)。判断ロジック(利益ガード・
+承認ゲート・deny-by-default・EBAY_ENVの安全なデフォルト)は一切変更していない。
+
+**追加・移動したもの**:
+- `channels/base.py`(新規): `SalesChannel`(ABC)。メソッドは
+  `create_or_update_inventory_item` / `create_offer` / `publish_offer` / `update_offer` /
+  `get_item_aspects_for_category` / `get_orders` の6つ。いずれも現在`orchestrator/do.py`の
+  `execute_publish`/`execute_price_change`が実際に呼んでいる操作、および`cli`の`sandbox
+  get-orders`が呼んでいる操作にちょうど対応する(orchestratorが呼んでいない操作は定義しない)。
+  ユーザー提示の例にあった`submit_fulfillment(order, tracking)`はこのコードベースには実装が無い
+  (Fulfillment APIは読み取り専用の`get_orders`のみ)ため、「発明しない」方針により含めていない。
+  メソッド名もeBayの既存メソッド名をそのまま使っている(`publish_listing`のような販路中立な
+  命名は、Shopify側の実際のデータ形状が分かっていないS0時点では発明になるため見送った。
+  S1で見直す余地がある)。
+- `channels/ebay.py`(新規): `EbayChannel`。`EbayClient`の対応メソッドへの薄い委譲のみ
+  (ロジックの移動のみで変更なし)。
+- `channels/shopify.py`(新規): `ShopifyChannel`。全メソッドが`NotImplementedError`(S1で実装予定)。
+- `channels/__init__.py`(新規): `create_channel(settings)`。`settings.channel`(`.env`の
+  `CHANNEL`、既定`"ebay"`)が`"shopify"`なら`ShopifyChannel()`、それ以外は
+  `EbayChannel(EbayClient.from_settings(settings))`を返す。
+- `config.py`: `channel: str = "ebay"`を追加。`.env.example`にも`CHANNEL=ebay`を追記。
+- `orchestrator/do.py`: `execute_publish`/`execute_price_change`/`run_do`の引数
+  `ebay_client: EbayClient` を `channel: SalesChannel` にリネームし、内部の
+  `ebay_client.xxx(...)` 呼び出しを `channel.xxx(...)` に置き換えた(移動のみ、判定ロジック・
+  冪等性・claimed_executionによる並行実行防止・例外処理はすべて元のまま)。
+  `execute_purchase`(サプライヤー発注、`orders/purchase_channel.py`の`PurchaseChannel`を使う
+  別系統)は無関係のため変更していない。
+- `orchestrator/__init__.py`: `Orchestrator.run_do`(未使用の薄いラッパー)も同様に
+  `channel: SalesChannel` へ更新(呼び出し元が無いため実害は無いが、整合性のため)。
+- `cli/__init__.py`: `sandbox get-orders`/`sandbox execute-publish`が、`EbayClient`を直接使う
+  代わりに`EbayChannel(EbayClient.from_settings(settings))`を経由するよう配線変更。
+  **`sandbox`コマンド群はeBay Sandbox疎通確認そのものが目的のため、`CHANNEL`設定に関わらず
+  常に`EbayChannel`を使う**(この2コマンド以外の`sandbox`サブコマンド ── check-auth /
+  rate-limits / setup-selling / seed-test-item / get-refresh-token ── は、Account API・
+  OAuth・Taxonomy(setup-selling用)等、`SalesChannel`に含めていない操作を使うため変更していない。
+  これらはeBay固有の環境検証ツールであり、販路抽象化の対象外と判断した)。
+- `tests/test_guardrail_gateway.py`: 静的検査`ALLOWED_WRITE_CALL_RELPATHS`に
+  `ebay_dropship/channels/ebay.py`を追加(`EbayChannel`が`EbayClient`の書き込みメソッドへ
+  委譲するために必要な追加。`do.py → channel(EbayChannel) → EbayClient`という単一経路は
+  変わらない)。
+- `tests/test_orchestrator_do.py` / `test_orchestrator_do_withdraw_visibility.py` /
+  `test_orchestrator_do_concurrency.py`: テスト内の`_ebay_client(backend) -> EbayClient`
+  ヘルパーを`_channel(backend) -> EbayChannel`に変更し、呼び出し箇所の`ebay_client=`を
+  `channel=`に置き換えた(シグネチャ変更に伴う機械的な追従のみ。アサーション・フェイク
+  バックエンドの挙動・テストの意図は一切変更していない)。
+- `tests/test_channels.py`(新規): `create_channel`が既定でeBayを選ぶこと(要件5)、
+  `channel="shopify"`でスタブが選ばれること、`EbayChannel`が`EbayClient`への薄い委譲で
+  あること、`ShopifyChannel`の全メソッドが`NotImplementedError`を送出すること、
+  `SalesChannel`が直接インスタンス化できない(ABC)ことを検証。
+
+**検証**: 全体テスト`312 passed`(リファクタ前の299 + 新規13件。299件は1件も削除・置換なく
+そのままgreenを維持 ── これがeBayの挙動保全の証拠)。`ruff check`もクリーン。
+
+**S1へ引き継ぐ論点(このエントリでは判断・実装していない)**:
+- `SalesChannel`のメソッド名・シグネチャをより販路中立な形へ見直すかどうか(Shopifyの実データ
+  形状が分かってから判断)。
+- 例外階層(`EbayApiError`/`EbayOfferAlreadyExistsError`)を販路非依存にするかどうか。
+- Shopify向けの利益ガード簡素化(自己設定価格ベース)の具体的な実装方法。
+- 需要/競合の自動判定が無いShopifyで、`research.evaluate_candidate`相当の判断をどう設計するか
+  (現状のeBay版は`recent_sales_30d`/`competitor_count`前提のため、そのままでは使えない)。

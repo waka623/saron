@@ -134,6 +134,10 @@ ALLOWED_WRITE_CALL_RELPATHS = {
     "ebay_dropship/adapters/ebay/client.py",
     "ebay_dropship/guardrails/gateway.py",
     "ebay_dropship/orchestrator/do.py",
+    # S0(2026-09-06、DECISIONS.md参照): SalesChannel抽象導入。EbayChannelはEbayClientへの
+    # 薄い委譲のみで、do.pyから見た「唯一の接続点」という不変条件そのものは変わらない
+    # (do.py → channel(EbayChannel) → EbayClient という1本の経路が保たれている)。
+    "ebay_dropship/channels/ebay.py",
 }
 
 

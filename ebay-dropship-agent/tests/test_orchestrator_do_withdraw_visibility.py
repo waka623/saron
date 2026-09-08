@@ -22,6 +22,7 @@ from sqlalchemy.orm import sessionmaker
 
 from ebay_dropship.adapters.ebay import EbayClient
 from ebay_dropship.approval import Priority, Proposal, ProposalStatus, ProposalType, RiskLevel
+from ebay_dropship.channels.ebay import EbayChannel
 from ebay_dropship.config import Settings
 from ebay_dropship.orchestrator.do import WithdrawNotImplementedError, run_do
 from ebay_dropship.store import Base, SqlProposalRepository
@@ -38,9 +39,9 @@ def repo():
     return SqlProposalRepository(session)
 
 
-def _ebay_client(backend: FakeInventoryBackend) -> EbayClient:
+def _channel(backend: FakeInventoryBackend) -> EbayChannel:
     http_client = httpx.Client(transport=backend.transport())
-    return EbayClient("id", "secret", "refresh", http_client=http_client, retry_sleep=lambda _s: None)
+    return EbayChannel(EbayClient("id", "secret", "refresh", http_client=http_client, retry_sleep=lambda _s: None))
 
 
 def _seed_approved_withdraw(repo) -> Proposal:
@@ -62,7 +63,7 @@ def test_run_do_surfaces_approved_withdraw_as_not_implemented_instead_of_vanishi
     proposal = _seed_approved_withdraw(repo)
     backend = FakeInventoryBackend()
 
-    results = run_do(repository=repo, ebay_client=_ebay_client(backend), settings=SETTINGS, calls_remaining=10)
+    results = run_do(repository=repo, channel=_channel(backend), settings=SETTINGS, calls_remaining=10)
 
     assert len(results) == 1, "承認済みwithdrawがrun_doの結果から消えている(サイレントに無視されている)"
     assert isinstance(results[0], WithdrawNotImplementedError)
@@ -80,7 +81,7 @@ def test_run_do_still_processes_other_proposals_alongside_pending_withdraw(repo)
     _seed_approved_price_change(repo)
     backend = FakeInventoryBackend()
 
-    results = run_do(repository=repo, ebay_client=_ebay_client(backend), settings=SETTINGS, calls_remaining=10)
+    results = run_do(repository=repo, channel=_channel(backend), settings=SETTINGS, calls_remaining=10)
 
     assert len(results) == 2
     exceptions = [r for r in results if isinstance(r, Exception)]

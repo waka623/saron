@@ -14,8 +14,8 @@ Plan/Check/Act の1サイクル分の実行(承認キューに積むところま
 
 from enum import StrEnum
 
-from ebay_dropship.adapters.ebay import EbayClient
 from ebay_dropship.approval import Proposal
+from ebay_dropship.channels.base import SalesChannel
 from ebay_dropship.config import Settings
 from ebay_dropship.orchestrator.do import run_do as _run_do
 from ebay_dropship.orders.purchase_channel import PurchaseChannel
@@ -35,7 +35,7 @@ class Orchestrator:
         self,
         *,
         repository: SqlProposalRepository,
-        ebay_client: EbayClient,
+        channel: SalesChannel,
         settings: Settings,
         calls_remaining: int,
         dry_run: bool = False,
@@ -45,7 +45,7 @@ class Orchestrator:
         """承認済み(APPROVED)の publish/price_change/purchase を実行する。実体は orchestrator/do.py。"""
         return _run_do(
             repository=repository,
-            ebay_client=ebay_client,
+            channel=channel,
             settings=settings,
             calls_remaining=calls_remaining,
             dry_run=dry_run,

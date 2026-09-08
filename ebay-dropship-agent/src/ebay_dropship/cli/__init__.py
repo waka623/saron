@@ -268,13 +268,18 @@ def sandbox_setup_selling(env_file: str) -> None:
 @sandbox.command("get-orders")
 @click.option("--since", default=None, help="ISO 8601形式(例: 2026-08-01T00:00:00Z)。省略時は全件。")
 def sandbox_get_orders(since: str | None) -> None:
-    """Fulfillment API の getOrders(読み取り専用)。購入者の個人情報は表示せず件数と概要のみ出力する。"""
+    """Fulfillment API の getOrders(読み取り専用)。購入者の個人情報は表示せず件数と概要のみ出力する。
+
+    `sandbox`コマンド群はeBay Sandbox疎通確認そのものが目的のため、`CHANNEL`設定に関わらず常に
+    `EbayChannel`(実eBay)を使う(S0で導入したSalesChannel経由の呼び出しに統一。挙動は変更なし)。
+    """
     _require_sandbox_env()
     from ebay_dropship.adapters.ebay import EbayApiError, EbayClient
+    from ebay_dropship.channels.ebay import EbayChannel
 
-    client = EbayClient.from_settings(settings)
+    channel = EbayChannel(EbayClient.from_settings(settings))
     try:
-        orders = client.get_orders(since=since)
+        orders = channel.get_orders(since=since)
     except EbayApiError as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(f"orders件数: {len(orders)}")
@@ -356,13 +361,18 @@ def sandbox_seed_test_item(
 )
 @click.option("--calls-remaining", default=100, show_default=True, type=int)
 def sandbox_execute_publish(proposal_id: str, live: bool, calls_remaining: int) -> None:
-    """承認済みのSandbox検証用publish提案を実行する(既定でdry_run。`--live`で実際にSandboxへ送信)。"""
+    """承認済みのSandbox検証用publish提案を実行する(既定でdry_run。`--live`で実際にSandboxへ送信)。
+
+    `sandbox`コマンド群はeBay Sandbox疎通確認そのものが目的のため、`CHANNEL`設定に関わらず常に
+    `EbayChannel`(実eBay)を使う(S0で導入したSalesChannel経由の呼び出しに統一。挙動は変更なし)。
+    """
     _require_sandbox_env()
     from ebay_dropship.adapters.ebay import EbayApiError, EbayClient
+    from ebay_dropship.channels.ebay import EbayChannel
     from ebay_dropship.guardrails.gateway import GuardrailDenied
     from ebay_dropship.orchestrator.do import execute_publish
 
-    client = EbayClient.from_settings(settings)
+    channel = EbayChannel(EbayClient.from_settings(settings))
     with _session() as session:
         repo = SqlProposalRepository(session)
         try:
@@ -373,7 +383,7 @@ def sandbox_execute_publish(proposal_id: str, live: bool, calls_remaining: int) 
             result = execute_publish(
                 proposal,
                 repository=repo,
-                ebay_client=client,
+                channel=channel,
                 settings=settings,
                 calls_remaining=calls_remaining,
                 dry_run=not live,

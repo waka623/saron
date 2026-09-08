@@ -23,6 +23,7 @@ from sqlalchemy.orm import sessionmaker
 
 from ebay_dropship.adapters.ebay import EbayClient
 from ebay_dropship.approval import Priority, Proposal, ProposalType, RiskLevel
+from ebay_dropship.channels.ebay import EbayChannel
 from ebay_dropship.config import Settings
 from ebay_dropship.orchestrator.do import execute_price_change, execute_publish
 from ebay_dropship.store import AlreadyClaimedError, Base, SqlProposalRepository
@@ -45,9 +46,9 @@ class BarrierRepository(SqlProposalRepository):
         return super().claimed_execution(proposal_id, decided_by)
 
 
-def _ebay_client(backend: FakeInventoryBackend) -> EbayClient:
+def _channel(backend: FakeInventoryBackend) -> EbayChannel:
     http_client = httpx.Client(transport=backend.transport())
-    return EbayClient("id", "secret", "refresh", http_client=http_client, retry_sleep=lambda _s: None)
+    return EbayChannel(EbayClient("id", "secret", "refresh", http_client=http_client, retry_sleep=lambda _s: None))
 
 
 def _seed_publish(db_path) -> None:
@@ -114,7 +115,7 @@ def _run_publish_once(db_path, backend: FakeInventoryBackend, barrier: threading
     try:
         proposal = repo.get(PUBLISH_PROPOSAL_ID)
         result = execute_publish(
-            proposal, repository=repo, ebay_client=_ebay_client(backend), settings=SETTINGS, calls_remaining=10
+            proposal, repository=repo, channel=_channel(backend), settings=SETTINGS, calls_remaining=10
         )
         session.commit()
         return ("ok", result.status.value)
@@ -136,7 +137,7 @@ def _run_price_change_once(db_path, backend: FakeInventoryBackend, barrier: thre
     try:
         proposal = repo.get(PRICE_PROPOSAL_ID)
         result = execute_price_change(
-            proposal, repository=repo, ebay_client=_ebay_client(backend), settings=SETTINGS, calls_remaining=10
+            proposal, repository=repo, channel=_channel(backend), settings=SETTINGS, calls_remaining=10
         )
         session.commit()
         return ("ok", result.status.value)

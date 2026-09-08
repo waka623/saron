@@ -15,6 +15,7 @@ from sqlalchemy.orm import sessionmaker
 
 from ebay_dropship.adapters.ebay import EbayApiError, EbayClient
 from ebay_dropship.approval import Priority, Proposal, ProposalStatus, ProposalType, RiskLevel
+from ebay_dropship.channels.ebay import EbayChannel
 from ebay_dropship.config import Settings
 from ebay_dropship.guardrails.gateway import GuardrailDenied
 from ebay_dropship.orchestrator.do import execute_price_change, execute_publish, run_do
@@ -37,10 +38,10 @@ def backend():
     return FakeInventoryBackend()
 
 
-def _ebay_client(backend: FakeInventoryBackend) -> EbayClient:
+def _channel(backend: FakeInventoryBackend) -> EbayChannel:
     http_client = httpx.Client(transport=backend.transport())
     # sleep=lambda _s: None でリトライの実待機を無くし、レート制限テストを高速化する。
-    return EbayClient("id", "secret", "refresh", http_client=http_client, retry_sleep=lambda _s: None)
+    return EbayChannel(EbayClient("id", "secret", "refresh", http_client=http_client, retry_sleep=lambda _s: None))
 
 
 def _publish_payload(**overrides) -> dict:
@@ -94,9 +95,9 @@ def _seed_approved_price_change(repo, **payload_overrides) -> Proposal:
 
 def test_publish_success_creates_item_offer_and_publishes(repo, backend):
     proposal = _seed_approved_publish(repo)
-    client = _ebay_client(backend)
+    channel = _channel(backend)
 
-    result = execute_publish(proposal, repository=repo, ebay_client=client, settings=SETTINGS, calls_remaining=10)
+    result = execute_publish(proposal, repository=repo, channel=channel, settings=SETTINGS, calls_remaining=10)
 
     assert result.status == ProposalStatus.EXECUTED
     stored = repo.get(proposal.id)
@@ -113,10 +114,10 @@ def test_publish_success_creates_item_offer_and_publishes(repo, backend):
 def test_publish_rejected_for_missing_item_specifics_marks_failed(repo, backend):
     backend.reject_publish_missing_specifics = True
     proposal = _seed_approved_publish(repo)
-    client = _ebay_client(backend)
+    channel = _channel(backend)
 
     with pytest.raises(EbayApiError, match="25007|Color"):
-        execute_publish(proposal, repository=repo, ebay_client=client, settings=SETTINGS, calls_remaining=10)
+        execute_publish(proposal, repository=repo, channel=channel, settings=SETTINGS, calls_remaining=10)
 
     stored = repo.get(proposal.id)
     assert stored.status == ProposalStatus.FAILED
@@ -133,10 +134,10 @@ def test_publish_rejected_for_missing_item_specifics_marks_failed(repo, backend)
 def test_publish_rate_limited_on_offer_creation_marks_failed(repo, backend):
     backend.rate_limit_offer_creation = True
     proposal = _seed_approved_publish(repo)
-    client = _ebay_client(backend)
+    channel = _channel(backend)
 
     with pytest.raises(EbayApiError, match="429|失敗"):
-        execute_publish(proposal, repository=repo, ebay_client=client, settings=SETTINGS, calls_remaining=10)
+        execute_publish(proposal, repository=repo, channel=channel, settings=SETTINGS, calls_remaining=10)
 
     stored = repo.get(proposal.id)
     assert stored.status == ProposalStatus.FAILED
@@ -150,10 +151,10 @@ def test_publish_rate_limited_on_offer_creation_marks_failed(repo, backend):
 def test_publish_partial_success_preserves_created_ids_and_marks_failed(repo, backend):
     backend.fail_publish_with_status = 500
     proposal = _seed_approved_publish(repo)
-    client = _ebay_client(backend)
+    channel = _channel(backend)
 
     with pytest.raises(EbayApiError):
-        execute_publish(proposal, repository=repo, ebay_client=client, settings=SETTINGS, calls_remaining=10)
+        execute_publish(proposal, repository=repo, channel=channel, settings=SETTINGS, calls_remaining=10)
 
     stored = repo.get(proposal.id)
     assert stored.status == ProposalStatus.FAILED
@@ -171,9 +172,9 @@ def test_publish_partial_success_preserves_created_ids_and_marks_failed(repo, ba
 def test_publish_duplicate_offer_reuses_existing_and_still_publishes(repo, backend):
     backend.duplicate_offer_sku = "X1"
     proposal = _seed_approved_publish(repo)
-    client = _ebay_client(backend)
+    channel = _channel(backend)
 
-    result = execute_publish(proposal, repository=repo, ebay_client=client, settings=SETTINGS, calls_remaining=10)
+    result = execute_publish(proposal, repository=repo, channel=channel, settings=SETTINGS, calls_remaining=10)
 
     assert result.status == ProposalStatus.EXECUTED
     stored = repo.get(proposal.id)
@@ -189,9 +190,9 @@ def test_publish_duplicate_offer_reuses_existing_and_still_publishes(repo, backe
 def test_publish_retry_after_interrupted_attempt_skips_completed_steps(repo, backend):
     """inventory_item/offer作成後にプロセスが落ちた想定(statusはAPPROVEDのまま、payloadだけ記録済み)。"""
     proposal = _seed_approved_publish(repo, ebay_item_id="X1", ebay_offer_id="offer-X1")
-    client = _ebay_client(backend)
+    channel = _channel(backend)
 
-    result = execute_publish(proposal, repository=repo, ebay_client=client, settings=SETTINGS, calls_remaining=10)
+    result = execute_publish(proposal, repository=repo, channel=channel, settings=SETTINGS, calls_remaining=10)
 
     assert result.status == ProposalStatus.EXECUTED
     put_inventory_calls = [c for c in backend.calls if c == ("PUT", "/sell/inventory/v1/inventory_item/X1")]
@@ -205,10 +206,10 @@ def test_publish_retry_after_interrupted_attempt_skips_completed_steps(repo, bac
 
 def test_publish_blocked_when_payload_missing_required_field_at_execution_time(repo, backend):
     proposal = _seed_approved_publish(repo, list_price=None)
-    client = _ebay_client(backend)
+    channel = _channel(backend)
 
     with pytest.raises(GuardrailDenied):
-        execute_publish(proposal, repository=repo, ebay_client=client, settings=SETTINGS, calls_remaining=10)
+        execute_publish(proposal, repository=repo, channel=channel, settings=SETTINGS, calls_remaining=10)
 
     assert backend.calls == []  # guardrailsで止まりネットワークには一切到達していない
 
@@ -218,10 +219,10 @@ def test_publish_blocked_when_payload_missing_required_field_at_execution_time(r
 
 def test_publish_dry_run_sends_nothing_and_leaves_status_approved(repo, backend):
     proposal = _seed_approved_publish(repo)
-    client = _ebay_client(backend)
+    channel = _channel(backend)
 
     result = execute_publish(
-        proposal, repository=repo, ebay_client=client, settings=SETTINGS, calls_remaining=10, dry_run=True
+        proposal, repository=repo, channel=channel, settings=SETTINGS, calls_remaining=10, dry_run=True
     )
 
     assert result.status == ProposalStatus.APPROVED
@@ -235,10 +236,10 @@ def test_publish_dry_run_sends_nothing_and_leaves_status_approved(repo, backend)
 
 def test_price_change_success_calls_update_offer_and_marks_executed(repo, backend):
     proposal = _seed_approved_price_change(repo)
-    client = _ebay_client(backend)
+    channel = _channel(backend)
 
     result = execute_price_change(
-        proposal, repository=repo, ebay_client=client, settings=SETTINGS, calls_remaining=10
+        proposal, repository=repo, channel=channel, settings=SETTINGS, calls_remaining=10
     )
 
     assert result.status == ProposalStatus.EXECUTED
@@ -254,11 +255,11 @@ def test_price_change_blocked_by_profit_guard_reverification_at_execution_time(r
     proposal = _seed_approved_price_change(repo)
     # 承認後に状況が変わった想定(利益がしきい値を下回る)。gatewayが実行直前に再検査してブロックする。
     strict_settings = Settings(min_net_profit=Decimal("100.0"))
-    client = _ebay_client(backend)
+    channel = _channel(backend)
 
     with pytest.raises(GuardrailDenied):
         execute_price_change(
-            proposal, repository=repo, ebay_client=client, settings=strict_settings, calls_remaining=10
+            proposal, repository=repo, channel=channel, settings=strict_settings, calls_remaining=10
         )
 
     assert backend.calls == []  # 利益ガードで止まり update_offer には到達していない
@@ -270,11 +271,11 @@ def test_price_change_blocked_by_profit_guard_reverification_at_execution_time(r
 
 def test_price_change_without_offer_id_fails_gracefully(repo, backend):
     proposal = _seed_approved_price_change(repo, ebay_offer_id=None)
-    client = _ebay_client(backend)
+    channel = _channel(backend)
 
     with pytest.raises(ValueError, match="ebay_offer_id"):
         execute_price_change(
-            proposal, repository=repo, ebay_client=client, settings=SETTINGS, calls_remaining=10
+            proposal, repository=repo, channel=channel, settings=SETTINGS, calls_remaining=10
         )
 
     assert repo.get(proposal.id).status == ProposalStatus.FAILED
@@ -285,10 +286,10 @@ def test_price_change_without_offer_id_fails_gracefully(repo, backend):
 
 def test_price_change_dry_run_sends_nothing(repo, backend):
     proposal = _seed_approved_price_change(repo)
-    client = _ebay_client(backend)
+    channel = _channel(backend)
 
     result = execute_price_change(
-        proposal, repository=repo, ebay_client=client, settings=SETTINGS, calls_remaining=10, dry_run=True
+        proposal, repository=repo, channel=channel, settings=SETTINGS, calls_remaining=10, dry_run=True
     )
 
     assert result.status == ProposalStatus.APPROVED
@@ -302,7 +303,7 @@ def test_run_do_processes_all_approved_proposals(repo, backend):
     _seed_approved_publish(repo, sku="X1")
     _seed_approved_price_change(repo)
 
-    results = run_do(repository=repo, ebay_client=_ebay_client(backend), settings=SETTINGS, calls_remaining=100)
+    results = run_do(repository=repo, channel=_channel(backend), settings=SETTINGS, calls_remaining=100)
 
     assert len(results) == 2
     assert all(isinstance(r, Proposal) and r.status == ProposalStatus.EXECUTED for r in results)
@@ -314,7 +315,7 @@ def test_run_do_continues_after_one_failure(repo, backend):
     _seed_approved_publish(repo, sku="X1")
     _seed_approved_price_change(repo)
 
-    results = run_do(repository=repo, ebay_client=_ebay_client(backend), settings=SETTINGS, calls_remaining=100)
+    results = run_do(repository=repo, channel=_channel(backend), settings=SETTINGS, calls_remaining=100)
 
     assert len(results) == 2
     exceptions = [r for r in results if isinstance(r, Exception)]

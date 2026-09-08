@@ -8,6 +8,10 @@ class Settings(BaseSettings):
     # 日本語コメントを含む.env/.env.exampleをロケール依存で読まれる余地を残さないため明示にする)。
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
+    # S0(2026-09-06、DECISIONS.md参照): どの販路(SalesChannel実装)を使うかの選択。既定はeBay。
+    # "shopify"は現時点では未実装スタブ(channels/shopify.py)。
+    channel: str = "ebay"
+
     ebay_env: str = "sandbox"
     ebay_client_id: str = ""
     ebay_client_secret: str = ""
