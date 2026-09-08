@@ -209,6 +209,8 @@ def test_get_orders_maps_shopify_shape_to_ebay_shaped_dicts():
                                 "name": "#1001",
                                 "displayFulfillmentStatus": "UNFULFILLED",
                                 "currentTotalPriceSet": {"shopMoney": {"amount": "29.99", "currencyCode": "USD"}},
+                                "shippingAddress": None,
+                                "lineItems": {"edges": []},
                             }
                         }
                     ]
@@ -225,8 +227,105 @@ def test_get_orders_maps_shopify_shape_to_ebay_shaped_dicts():
             "orderId": "#1001",
             "orderFulfillmentStatus": "UNFULFILLED",
             "pricingSummary": {"total": {"value": "29.99", "currency": "USD"}},
+            "line_items": [],
+            "shipping_address": None,
+            "_shopify_order_gid": "gid://shopify/Order/1",
         }
     ]
+
+
+def test_get_orders_maps_line_items_and_shipping_address():
+    def handler(query: str, variables: dict) -> dict:
+        return {
+            "data": {
+                "orders": {
+                    "edges": [
+                        {
+                            "node": {
+                                "id": "gid://shopify/Order/2",
+                                "name": "#1002",
+                                "displayFulfillmentStatus": "UNFULFILLED",
+                                "currentTotalPriceSet": {"shopMoney": {"amount": "19.99", "currencyCode": "USD"}},
+                                "shippingAddress": {
+                                    "name": "Jane Doe",
+                                    "address1": "123 Main St",
+                                    "city": "Springfield",
+                                    "provinceCode": "IL",
+                                    "countryCodeV2": "US",
+                                    "zip": "62701",
+                                },
+                                "lineItems": {"edges": [{"node": {"sku": "MUG-001", "quantity": 2}}]},
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+
+    channel = _shopify_channel(handler)
+
+    orders = channel.get_orders()
+
+    assert orders[0]["line_items"] == [{"sku": "MUG-001", "quantity": 2}]
+    assert orders[0]["shipping_address"] == {
+        "ship_to_name": "Jane Doe",
+        "ship_to_address1": "123 Main St",
+        "ship_to_city": "Springfield",
+        "ship_to_region": "IL",
+        "ship_to_country": "US",
+        "ship_to_zip": "62701",
+    }
+
+
+# --- submit_fulfillment(S2) ---
+
+
+def test_ebay_channel_submit_fulfillment_raises_not_implemented():
+    from ebay_dropship.channels.ebay import EbayChannel
+
+    channel = EbayChannel(_client())
+
+    with pytest.raises(NotImplementedError):
+        channel.submit_fulfillment("order-1", {"tracking_number": "1Z999"})
+
+
+def test_shopify_channel_submit_fulfillment_writes_tracking():
+    calls = []
+
+    def handler(query: str, variables: dict) -> dict:
+        calls.append(query)
+        if "getFulfillmentOrder" in query:
+            assert variables["id"] == "gid://shopify/Order/1"
+            return {"data": {"order": {"fulfillmentOrders": {"edges": [{"node": {"id": "gid://shopify/FulfillmentOrder/1"}}]}}}}
+        assert "fulfillmentCreate" in query
+        assert variables["fulfillment"]["lineItemsByFulfillmentOrder"] == [
+            {"fulfillmentOrderId": "gid://shopify/FulfillmentOrder/1"}
+        ]
+        assert variables["fulfillment"]["trackingInfo"] == {
+            "number": "1Z999",
+            "url": "https://track.example/1Z999",
+            "company": "UPS",
+        }
+        return {"data": {"fulfillmentCreate": {"fulfillment": {"id": "gid://shopify/Fulfillment/1", "status": "SUCCESS"}, "userErrors": []}}}
+
+    channel = _shopify_channel(handler)
+
+    result = channel.submit_fulfillment(
+        "gid://shopify/Order/1",
+        {"tracking_number": "1Z999", "tracking_url": "https://track.example/1Z999", "carrier": "UPS"},
+    )
+
+    assert result == {"id": "gid://shopify/Fulfillment/1", "status": "SUCCESS"}
+
+
+def test_shopify_channel_submit_fulfillment_raises_when_fulfillment_order_missing():
+    def handler(query: str, variables: dict) -> dict:
+        return {"data": {"order": {"fulfillmentOrders": {"edges": []}}}}
+
+    channel = _shopify_channel(handler)
+
+    with pytest.raises(ShopifyApiError):
+        channel.submit_fulfillment("gid://shopify/Order/missing", {"tracking_number": "1Z999"})
 
 
 # --- SalesChannel自体は抽象クラスでインスタンス化できないこと ---

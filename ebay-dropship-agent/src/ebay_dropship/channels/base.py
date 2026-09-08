@@ -15,6 +15,11 @@
   環境そのものの検証にしか使わない操作はここに含めない(全販路に共通する概念ではないため)。
 - 例外(`EbayApiError`/`EbayOfferAlreadyExistsError`)も既存のまま呼び出し側に伝播させる。
   販路非依存の例外階層への統一はS1でShopifyの実装を見てから判断する。
+
+**S2で追加した`submit_fulfillment`**: POD(Printify等)が発送し追跡番号が得られたら、それを
+販路側の注文へ書き戻すための操作。eBayはこのコードベースでは書き込みFulfillment(発送情報の
+反映)に対応していない(読み取り専用の`get_orders`のみ)ため、`EbayChannel`は明確な理由付きで
+`NotImplementedError`を送出する(eBayの既存挙動は変えない。呼び出されなければ何も起きない)。
 """
 
 from __future__ import annotations
@@ -40,3 +45,11 @@ class SalesChannel(ABC):
 
     @abstractmethod
     def get_orders(self, since: str | None = None) -> list[dict]: ...
+
+    @abstractmethod
+    def submit_fulfillment(self, order_id: str, tracking: dict) -> dict:
+        """注文に追跡番号を書き込む(発送済みにする)。`tracking`は少なくとも
+
+        `tracking_number`キーを持つdict(`tracking_url`/`carrier`は任意)。
+        """
+        ...

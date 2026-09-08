@@ -50,6 +50,12 @@ from ebay_dropship.guardrails import ComplianceError, GuardrailResult, check_sup
 from ebay_dropship.guardrails.gateway import GuardrailDenied, execute_side_effect
 from ebay_dropship.orders import DEFAULT_EBAY_FEE_PCT
 from ebay_dropship.orders.purchase_channel import PurchaseChannel, PurchaseOrderPacket
+from ebay_dropship.pod import (
+    SupplierOrder,
+    SupplierOrderItem,
+    SupplierProvider,
+    SupplierProviderError,
+)
 from ebay_dropship.pricing import calculate_net_profit
 from ebay_dropship.store.repository import AlreadyClaimedError, SqlProposalRepository
 from ebay_dropship.supplier import SupplierAdapter
@@ -60,6 +66,10 @@ from ebay_dropship.supplier import SupplierAdapter
 # PROMPT.md第1章7項の要件を満たす)。例外階層自体を販路非依存に統一するかどうかはS1時点でも
 # 未着手(DECISIONS.mdのS1引き継ぎ論点のまま)。
 _CHANNEL_API_ERRORS = (EbayApiError, ShopifyApiError)
+
+# S2: execute_supplier_purchase/sync_supplier_fulfillmentが捕捉する例外。SupplierProviderError
+# (Printify等のPOD発注失敗)とShopifyApiError(submit_fulfillmentのShopify書き戻し失敗)の両方。
+_SUPPLIER_PURCHASE_ERRORS = (SupplierProviderError, ShopifyApiError)
 
 
 def _inventory_item_payload(payload: Mapping[str, Any]) -> dict:
@@ -370,6 +380,145 @@ def execute_purchase(
     return repository.get(proposal.id)
 
 
+def execute_supplier_purchase(
+    proposal: Proposal,
+    *,
+    repository: SqlProposalRepository,
+    channel: SalesChannel,
+    supplier_provider: SupplierProvider,
+    settings: Settings,
+    calls_remaining: int,
+    dry_run: bool = False,
+    source_description: str = "",
+) -> Proposal:
+    """S2: 承認済みsupplier_purchase提案を実行する(Shopify注文→POD発注。レベルB=承認必須)。
+
+    `enable_automated_supplier_purchase`フラグの値に関わらず、この関数は
+    `guardrails.gateway.execute_side_effect`(status==APPROVEDでなければComplianceError)を
+    経由しないと呼ばれてはならない。つまり「発注(お金が動く実行)は人間の承認後のみ」という
+    レベルB方針は、他のexecute_*関数と全く同じ既存の仕組み(deny-by-default)でそのまま担保される
+    (この関数自体が新しい承認バイパス経路を作っていないことは、既存の
+    `tests/test_guardrail_gateway.py`の静的検査で確認できる。`submit_order`は
+    write_methodsに追加済み)。
+
+    tracking(追跡番号)の取得・Shopifyへの書き戻しはこの関数の責務ではない
+    (`sync_supplier_fulfillment`が別途行う。POD側の発送には時間がかかり、発注の瞬間には
+    まだtrackingが無いのが通常のため)。
+    """
+    if proposal.proposal_type is not ProposalType.SUPPLIER_PURCHASE:
+        raise ValueError(
+            f"execute_supplier_purchase は supplier_purchase 提案専用です(proposal_type={proposal.proposal_type})"
+        )
+
+    def executor(p: Proposal) -> None:
+        payload = dict(p.payload)
+
+        if dry_run:
+            payload["dry_run_preview"] = {
+                "submit_order_request": {
+                    "sku": payload.get("sku"),
+                    "quantity": payload.get("quantity"),
+                    "shipping_address": payload.get("shipping_address"),
+                }
+            }
+            repository.update_payload(p.id, payload)
+            return
+
+        if payload.get("supplier_order_id"):
+            # 中断からの再開: 既にPOD発注済み(冪等。submit_orderは呼ばない)。
+            # execute_purchase/execute_publishと同じく、executedへの遷移自体は他の実行者と
+            # 競合しうるため claimed_execution 経由の原子的な条件付き更新で行う。
+            with repository.claimed_execution(p.id, decided_by="orchestrator"):
+                pass
+            return
+
+        shipping = payload.get("shipping_address") or {}
+        order = SupplierOrder(
+            order_id=payload["shopify_order_id"],
+            ship_to_name=shipping.get("ship_to_name", ""),
+            ship_to_address1=shipping.get("ship_to_address1", ""),
+            ship_to_city=shipping.get("ship_to_city", ""),
+            ship_to_region=shipping.get("ship_to_region", ""),
+            ship_to_country=shipping.get("ship_to_country", ""),
+            ship_to_zip=shipping.get("ship_to_zip", ""),
+        )
+        item = SupplierOrderItem(sku=payload["sku"], quantity=payload["quantity"])
+        # F3/F4と同様、発注権の獲得(executedへの原子的な条件付き更新)と実際の
+        # submit_order呼び出しを1つのSAVEPOINTとして直列化する(二重発注防止)。
+        try:
+            with repository.claimed_execution(p.id, decided_by="orchestrator"):
+                supplier_order_id = supplier_provider.submit_order(order, item)
+                payload["supplier_order_id"] = supplier_order_id
+                repository.update_payload(p.id, payload)
+        except AlreadyClaimedError:
+            raise
+        except _SUPPLIER_PURCHASE_ERRORS as exc:
+            repository.mark_failed(p.id, decided_by="orchestrator", reason=f"POD発注失敗: {exc}")
+            raise
+
+    execute_side_effect(
+        proposal,
+        executor,
+        settings=settings,
+        calls_remaining=calls_remaining,
+        calls_needed=1,
+        source_description=source_description or proposal.rationale,
+    )
+    return repository.get(proposal.id)
+
+
+def sync_supplier_fulfillment(
+    proposal: Proposal,
+    *,
+    repository: SqlProposalRepository,
+    channel: SalesChannel,
+    supplier_provider: SupplierProvider,
+) -> Proposal:
+    """S2: 実行済み(EXECUTED)のsupplier_purchase提案について、PODの発送状況を確認し、
+
+    trackingが得られていればShopifyへ書き戻す(まだなら何もしない。何度呼んでも冪等)。
+
+    新しい承認は不要 ── これは新しい外部副作用の起点ではなく、既に人間が承認・実行した発注の
+    「履行」の一部(発送されたら追跡番号を反映するだけ)であるため。ただしガードとして、
+    対象がEXECUTED状態のsupplier_purchase提案であることを必須にする(deny-by-default。
+    未承認・未実行の提案や他のproposal_typeに対しては呼び出せない)。
+    """
+    if proposal.proposal_type is not ProposalType.SUPPLIER_PURCHASE:
+        raise ValueError(
+            f"sync_supplier_fulfillment は supplier_purchase 提案専用です(proposal_type={proposal.proposal_type})"
+        )
+    if proposal.status is not ProposalStatus.EXECUTED:
+        raise ComplianceError(
+            f"未実行(status={proposal.status})のsupplier_purchase提案はtracking同期の対象外です"
+            "(承認済み注文の履行としてのみ実行する)。"
+        )
+
+    payload = dict(proposal.payload)
+    if payload.get("tracking_synced"):
+        return proposal  # 冪等: 既に書き戻し済み
+
+    supplier_order_id = payload.get("supplier_order_id")
+    if not supplier_order_id:
+        raise ValueError(f"proposal {proposal.id} に supplier_order_id が記録されていません(発注未実行)。")
+
+    fulfillment = supplier_provider.get_fulfillment(supplier_order_id)
+    if not fulfillment.tracking_number:
+        return proposal  # まだ未発送。次回また確認する
+
+    channel.submit_fulfillment(
+        payload["shopify_order_id"],
+        {
+            "tracking_number": fulfillment.tracking_number,
+            "tracking_url": fulfillment.tracking_url,
+            "carrier": fulfillment.carrier,
+        },
+    )
+    payload["tracking_number"] = fulfillment.tracking_number
+    payload["tracking_synced"] = True
+    repository.update_payload(proposal.id, payload)
+    return repository.get(proposal.id)
+
+
 class WithdrawNotImplementedError(Exception):
     """F7: withdraw提案は承認ゲートを通過するが、実行するeBay API連携がまだ実装されていない。
 
@@ -388,14 +537,18 @@ def run_do(
     dry_run: bool = False,
     supplier: SupplierAdapter | None = None,
     purchase_channel: PurchaseChannel | None = None,
+    supplier_provider: SupplierProvider | None = None,
 ) -> list[Proposal | Exception]:
-    """承認済み(APPROVED)の publish/price_change/purchase をすべて実行する。
+    """承認済み(APPROVED)の publish/price_change/purchase/supplier_purchase をすべて実行する。
 
     1件の失敗が他の提案の処理を止めないよう、例外はここで捕捉して結果リストに含める
     (各提案自身の成否は repository に確定的に記録済みなので、ここで握りつぶしても実害はない)。
     supplier/purchase_channel が未指定の場合、purchase 提案はスキップする。
+    supplier_provider が未指定の場合、supplier_purchase 提案はスキップする(S2)。
     withdraw は実行するeBay API連携が未実装のため、承認済みでも実行はせず
     `WithdrawNotImplementedError` を結果に積んで可視化する(F7、DECISIONS.md参照)。
+    tracking同期(`sync_supplier_fulfillment`)はEXECUTED状態の提案が対象のためここには含まない
+    (S3で別途スケジュール実行する想定。DECISIONS.md参照)。
     """
     results: list[Proposal | Exception] = []
     for proposal in repository.list_approved():
@@ -429,6 +582,18 @@ def run_do(
                         repository=repository,
                         supplier=supplier,
                         purchase_channel=purchase_channel,
+                        settings=settings,
+                        calls_remaining=calls_remaining,
+                        dry_run=dry_run,
+                    )
+                )
+            elif proposal.proposal_type is ProposalType.SUPPLIER_PURCHASE and supplier_provider:
+                results.append(
+                    execute_supplier_purchase(
+                        proposal,
+                        repository=repository,
+                        channel=channel,
+                        supplier_provider=supplier_provider,
                         settings=settings,
                         calls_remaining=calls_remaining,
                         dry_run=dry_run,

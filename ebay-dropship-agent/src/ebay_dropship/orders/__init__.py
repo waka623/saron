@@ -14,8 +14,19 @@ from ebay_dropship.config import Settings
 from ebay_dropship.config import settings as default_settings
 from ebay_dropship.guardrails import check_supplier_data_freshness
 from ebay_dropship.orders.models import IncomingOrder, OrderIngestResult, OrderParseError
+from ebay_dropship.pod import SupplierPurchaseLineItem
 from ebay_dropship.pricing import calculate_net_profit
 from ebay_dropship.supplier import SupplierAdapter
+
+# S2(2026-09-06、DECISIONS.md参照): evaluate_supplier_purchaseがPOD発注の配送先として必須とする項目。
+REQUIRED_SHIPPING_ADDRESS_FIELDS: tuple[str, ...] = (
+    "ship_to_name",
+    "ship_to_address1",
+    "ship_to_city",
+    "ship_to_region",
+    "ship_to_country",
+    "ship_to_zip",
+)
 
 # eBay Account API 導入(将来フェーズ)までの暫定値。research/listingと同じ既定値。
 DEFAULT_EBAY_FEE_PCT = Decimal(13)
@@ -180,5 +191,89 @@ def evaluate_purchase(
             "customer_paid": order.customer_paid,
             "ship_to_country": order.ship_to_country,
             "due_date": order.due_date.isoformat(),
+        },
+    )
+
+
+# --- S2: Shopify注文 → POD(Printify等)サプライヤー発注の判断(受注処理判断エージェント、レベルB) ---
+#
+# 既存のevaluate_purchase(上記)とは別関数(既存のeBay/CSVサプライヤー向けロジックは変更しない)。
+# pod.SupplierProviderはsubmit_order/get_fulfillmentの2メソッドのみで「現在原価を問い合わせる」
+# 手段が無いため、evaluate_purchaseのような実行時の原価再検査は行えない。この関数はPlan時点で
+# 判断材料(原価・配送先情報)が揃っているかだけを検査する(deny-by-default)。
+#
+# 1つのShopify注文が複数明細(SKU)を持つ場合、本関数は明細1件ずつ呼び出す想定
+# (pod.SupplierProvider.submit_orderがorder+item=1件単位のため、粒度を合わせている)。
+
+
+def _supplier_purchase_hold(shopify_order_id: str, item: SupplierPurchaseLineItem, issue: str) -> Proposal:
+    return Proposal(
+        proposal_type=ProposalType.HOLD,
+        priority=Priority.NEEDS_REVIEW,
+        summary=f"Shopify注文{shopify_order_id}: {item.sku}のPOD発注を保留(要確認)。",
+        rationale=issue,
+        risk_level=RiskLevel.HIGH,
+        estimated_profit=None,
+        requires_human_approval=True,
+        payload={
+            "shopify_order_id": shopify_order_id,
+            "sku": item.sku,
+            "quantity": item.quantity,
+            "unit_cost": item.unit_cost,
+            "issue": issue,
+        },
+    )
+
+
+def evaluate_supplier_purchase(
+    shopify_order_id: str,
+    item: SupplierPurchaseLineItem,
+    shipping_address: dict | None,
+    *,
+    settings: Settings = default_settings,
+) -> Proposal:
+    """Shopify注文の明細1件について、POD(Printify等)へ発注してよいか判断する(レベルB=承認必須)。
+
+    proposal_type は supplier_purchase/hold のみ。deny-by-default: 配送先情報の欠落・原価上限
+    (`settings.max_supplier_order_cost`)超過はhold(自動発注しない)。`enable_automated_supplier_
+    purchase`フラグの値に関わらず、ここで生成した提案は`requires_human_approval=True`固定であり、
+    実際の発注(`orchestrator/do.py::execute_supplier_purchase`)は人間の承認後にしか呼ばれない。
+    """
+    if shipping_address is None:
+        return _supplier_purchase_hold(shopify_order_id, item, "配送先情報が取得できません(欠落のためhold)。")
+
+    missing = [f for f in REQUIRED_SHIPPING_ADDRESS_FIELDS if not shipping_address.get(f)]
+    if missing:
+        return _supplier_purchase_hold(
+            shopify_order_id, item, f"配送先情報が不足しています: {missing}(欠落のためhold)。"
+        )
+
+    total_cost = item.unit_cost * item.quantity
+    if total_cost > settings.max_supplier_order_cost:
+        return _supplier_purchase_hold(
+            shopify_order_id,
+            item,
+            f"発注原価合計{total_cost}が上限{settings.max_supplier_order_cost}を超過しています。",
+        )
+
+    return Proposal(
+        proposal_type=ProposalType.SUPPLIER_PURCHASE,
+        priority=Priority.HIGH,
+        summary=f"Shopify注文{shopify_order_id}: {item.sku}をPODへ発注してよいと判断。",
+        rationale=(
+            f"PODサプライヤーへの直送発注。配送先情報を確認済み。発注原価合計{total_cost}"
+            f"(単価{item.unit_cost}×数量{item.quantity})は上限{settings.max_supplier_order_cost}以内。"
+        ),
+        risk_level=RiskLevel.LOW,
+        estimated_profit=None,  # 利益判断は出品時(research.evaluate_shopify_listing_candidate)の役割
+        requires_human_approval=True,
+        payload={
+            "shopify_order_id": shopify_order_id,
+            "sku": item.sku,
+            "quantity": item.quantity,
+            "unit_cost": item.unit_cost,
+            "total_cost": total_cost,
+            "shipping_address": shipping_address,
+            "issue": "",
         },
     )

@@ -138,6 +138,9 @@ ALLOWED_WRITE_CALL_RELPATHS = {
     # 薄い委譲のみで、do.pyから見た「唯一の接続点」という不変条件そのものは変わらない
     # (do.py → channel(EbayChannel) → EbayClient という1本の経路が保たれている)。
     "ebay_dropship/channels/ebay.py",
+    # S2(2026-09-06、DECISIONS.md参照): ShopifyChannel.submit_fulfillmentがShopifyClientの
+    # 同名メソッドへ委譲するために必要な追加(write_methodsに"submit_fulfillment"を追加したため)。
+    "ebay_dropship/channels/shopify.py",
 }
 
 
@@ -177,12 +180,23 @@ def _scan_for_bypassing_write_calls(
 
 
 def test_ebay_write_methods_are_only_called_through_guardrail_gateway():
-    """静的検査: EbayClient の書き込みメソッド呼び出しは、定義箇所と gateway 自身を除いてコードベースに存在しないこと。
+    """静的検査: 副作用系の書き込みメソッド呼び出しは、定義箇所とgateway自身を除いてコードベースに
 
-    Phase 4 で実際の eBay 書き込みを実装する際、guardrails.gateway.execute_side_effect の
-    executor コールバック以外から EbayClient.create_offer 等を呼ぶコードを追加すると、このテストが失敗する。
+    存在しないこと(eBay: EbayClient、S2で追加したPOD発注/追跡番号書き戻しも同様)。
+    guardrails.gateway.execute_side_effect の executor コールバック以外から
+    EbayClient.create_offer や SupplierProvider.submit_order 等を呼ぶコードを追加すると、
+    このテストが失敗する。
     """
-    write_methods = ("create_or_update_inventory_item", "create_offer", "publish_offer", "update_offer")
+    write_methods = (
+        "create_or_update_inventory_item",
+        "create_offer",
+        "publish_offer",
+        "update_offer",
+        # S2(2026-09-06、DECISIONS.md参照): POD発注(submit_order)・追跡番号書き戻し
+        # (submit_fulfillment)も実際にお金/顧客への発送情報が動く副作用のため対象に加える。
+        "submit_order",
+        "submit_fulfillment",
+    )
     src_root = pathlib.Path(__file__).resolve().parents[1] / "src"
 
     offending = _scan_for_bypassing_write_calls(src_root, write_methods, ALLOWED_WRITE_CALL_RELPATHS)

@@ -31,3 +31,17 @@ class EbayChannel(SalesChannel):
 
     def get_orders(self, since: str | None = None) -> list[dict]:
         return self._client.get_orders(since=since)
+
+    def submit_fulfillment(self, order_id: str, tracking: dict) -> dict:
+        """S2で`SalesChannel`に追加されたメソッド。このコードベースの`EbayClient`は
+
+        Fulfillment APIの書き込み(発送情報の反映)に対応していない(読み取り専用の
+        `get_orders`のみ実装済み)ため、明確な理由付きで未実装として送出する。
+        eBayの既存挙動(get_orders等)はこの追加による影響を一切受けない。
+        """
+        raise NotImplementedError(
+            "EbayChannel.submit_fulfillment: このコードベースのEbayClientはFulfillment APIの"
+            "書き込み(発送情報の反映)に未対応です(読み取り専用のget_ordersのみ実装済み)。"
+            "eBayへ追跡番号を反映する場合は、EbayClientにcreateShippingFulfillment相当の"
+            "書き込みメソッドを追加したうえで、ここに委譲する実装が必要です。"
+        )

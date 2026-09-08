@@ -20,6 +20,13 @@ class Settings(BaseSettings):
     # 現在のstableバージョンを確認して設定すること。
     shopify_api_version: str = ""
 
+    # --- Printify(POD、S2、pod/・adapters/printify/) ---
+    printify_api_token: str = ""
+    printify_shop_id: str = ""
+    # レベルB(承認必須)の deny-by-default ガード: 原価がこれを超える発注提案はhold(自動発注しない)。
+    # 仮の初期値(要ユーザー確認・調整。安全側=低めに設定してある)。
+    max_supplier_order_cost: Decimal = Decimal("50.00")
+
     ebay_env: str = "sandbox"
     ebay_client_id: str = ""
     ebay_client_secret: str = ""

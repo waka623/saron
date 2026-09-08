@@ -17,6 +17,10 @@ DECISIONS.mdの「S1へ引き継ぐ論点」参照)ため、以下の橋渡し�
    なので、eBayと同じく「承認→実行の最終ステップまでは非公開」という安全性は保たれている。
 4. `get_item_aspects_for_category`はeBay Taxonomy固有の概念(カテゴリ必須アスペクト)であり、
    Shopifyには存在しない。空リストを返す(補完対象なし、というのが正しい振る舞い)。
+5. (S2)`get_orders`は`line_items`/`shipping_address`を追加で返す(`orders.evaluate_supplier_
+   purchase`がSKU・数量・配送先を必要とするため)。既存キー(`orderId`等、S1)は変更していない。
+6. (S2)`submit_fulfillment`は`ShopifyClient.get_fulfillment_order_id`→`submit_fulfillment`の
+   2段で実装する(FulfillmentOrder GIDが必要なため)。
 """
 
 from __future__ import annotations
@@ -75,15 +79,37 @@ class ShopifyChannel(SalesChannel):
     def get_orders(self, since: str | None = None) -> list[dict]:
         """Shopifyの注文をeBay版`get_orders()`と同じ内部表現(dict shape)にマッピングする。
 
-        eBay版: {"orderId", "orderFulfillmentStatus", "pricingSummary": {"total": {"value", "currency"}}}。
+        eBay版(S1): {"orderId", "orderFulfillmentStatus", "pricingSummary": {"total": {"value", "currency"}}}。
         `orderFulfillmentStatus`の実際の値(eBay: NOT_STARTED等、Shopify: UNFULFILLED等)は
         プラットフォームごとに異なる語彙のため、Shopify側の文字列をそのまま渡す(呼び出し側が
-        両プラットフォーム共通の意味を必要とする場合は別途正規化が必要。DECISIONS.md参照)。
+        共通の意味を必要とする場合は別途正規化が必要。DECISIONS.md参照)。
+
+        S2で追加: "line_items"(`[{"sku", "quantity"}]`)と"shipping_address"
+        (`orders.REQUIRED_SHIPPING_ADDRESS_FIELDS`に合わせた`ship_to_*`キー)。
+        `evaluate_supplier_purchase`が発注判断に使う。取得できない場合は
+        "shipping_address"を`None`にする(deny-by-defaultで呼び出し側がholdにできるように)。
         """
         raw_orders = self._client.get_orders(since=since)
         mapped = []
         for order in raw_orders:
             money = order.get("currentTotalPriceSet", {}).get("shopMoney", {})
+            line_items = [
+                {"sku": edge["node"].get("sku"), "quantity": edge["node"].get("quantity")}
+                for edge in order.get("lineItems", {}).get("edges", [])
+            ]
+            address = order.get("shippingAddress")
+            shipping_address = (
+                {
+                    "ship_to_name": address.get("name"),
+                    "ship_to_address1": address.get("address1"),
+                    "ship_to_city": address.get("city"),
+                    "ship_to_region": address.get("provinceCode"),
+                    "ship_to_country": address.get("countryCodeV2"),
+                    "ship_to_zip": address.get("zip"),
+                }
+                if address
+                else None
+            )
             mapped.append(
                 {
                     "orderId": order.get("name") or order.get("id"),
@@ -94,6 +120,25 @@ class ShopifyChannel(SalesChannel):
                             "currency": money.get("currencyCode"),
                         }
                     },
+                    "line_items": line_items,
+                    "shipping_address": shipping_address,
+                    "_shopify_order_gid": order.get("id"),
                 }
             )
         return mapped
+
+    def submit_fulfillment(self, order_id: str, tracking: dict) -> dict:
+        """`order_id`はShopifyの注文GID(`get_orders()`が返す"_shopify_order_gid")。
+
+        まずFulfillmentOrder GIDを取得してから追跡番号を書き込む(2段。要確認事項は
+        `adapters/shopify/client.py`のモジュールdocstring参照)。
+        """
+        fulfillment_order_id = self._client.get_fulfillment_order_id(order_id)
+        if fulfillment_order_id is None:
+            raise ShopifyApiError(f"order_id={order_id} のFulfillmentOrderが見つかりません。")
+        return self._client.submit_fulfillment(
+            fulfillment_order_id,
+            tracking_number=tracking["tracking_number"],
+            tracking_url=tracking.get("tracking_url"),
+            carrier=tracking.get("carrier"),
+        )

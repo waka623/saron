@@ -25,6 +25,12 @@ from ebay_dropship.guardrails import (
 )
 
 PROFIT_GATED_TYPES = frozenset({ProposalType.PRICE_CHANGE, ProposalType.PURCHASE})
+# SUPPLIER_PURCHASE(S2)は意図的にここへ含めていない: このproposal_typeのdeny-by-defaultは
+# 「利益率が目標未満」ではなく「原価が設定上限(max_supplier_order_cost)を超過」であり、
+# 出品時に既にevaluate_shopify_listing_candidateで利益ガードを通過済みの商品に対する
+# 受注後の発注可否判断のため、ここでもう一度min_net_profitで弾く意味が無い
+# (estimated_profitを無理に用意すると、この関数のcheck_profit_guardが常にNone扱いでdenyしてしまう)。
+# 原価上限チェックはorders.py::evaluate_supplier_purchaseがPlan時点で行う(DECISIONS.md参照)。
 
 
 class GuardrailDenied(ComplianceError):

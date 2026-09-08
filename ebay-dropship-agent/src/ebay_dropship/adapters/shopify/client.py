@@ -13,6 +13,10 @@
 - 出品公開(`publish_product`)は`productUpdate(status: ACTIVE)`のみで実装している。
   ストアの販売チャネル設定によっては、別途`publishablePublish`で対象チャネル
   (例: オンラインストア)への公開が必要な場合がある。要確認。
+- 追跡番号の書き込み(`submit_fulfillment`、S2)は`fulfillmentOrders(first: 1)`で先頭の
+  FulfillmentOrderのみを取得している。部分発送(注文が複数のFulfillmentOrderに分かれる)が
+  ある場合はこれだけでは不十分(要確認)。`FulfillmentInput`のフィールド名
+  (`lineItemsByFulfillmentOrder`/`trackingInfo`)もAPIバージョンにより変わりうる。
 """
 
 from __future__ import annotations
@@ -127,7 +131,12 @@ class ShopifyClient:
         self._execute(query, {"input": {"id": product_id, "status": "ACTIVE"}}, "productUpdate")
 
     def get_orders(self, since: str | None = None) -> list[dict]:
-        """注文一覧を取得する。呼び出し側(`ShopifyChannel`)がeBayと同じ内部表現へマッピングする。"""
+        """注文一覧を取得する。呼び出し側(`ShopifyChannel`)がeBayと同じ内部表現へマッピングする。
+
+        S2(DECISIONS.md参照)で`lineItems`/`shippingAddress`を追加した
+        (`evaluate_supplier_purchase`がSKU・数量・配送先を必要とするため)。既存の
+        `orderId`/`orderFulfillmentStatus`/`pricingSummary`(S1)は変更していない。
+        """
         query = """
         query listOrders($query: String) {
           orders(first: 50, query: $query) {
@@ -137,6 +146,17 @@ class ShopifyClient:
                 name
                 displayFulfillmentStatus
                 currentTotalPriceSet { shopMoney { amount currencyCode } }
+                shippingAddress {
+                  name
+                  address1
+                  city
+                  provinceCode
+                  countryCodeV2
+                  zip
+                }
+                lineItems(first: 50) {
+                  edges { node { sku quantity } }
+                }
               }
             }
           }
@@ -145,3 +165,49 @@ class ShopifyClient:
         search_query = f"created_at:>={since}" if since else None
         data = self._execute(query, {"query": search_query})
         return [edge["node"] for edge in data["orders"]["edges"]]
+
+    # --- 追跡番号の書き込み(発送済みへの更新。S2) ---
+    def get_fulfillment_order_id(self, order_id: str) -> str | None:
+        """注文の(未処理分の)FulfillmentOrder GIDを取得する。`submit_fulfillment`の前段。
+
+        要確認: 部分発送(複数FulfillmentOrderに分かれる)がある注文では`first: 1`は不十分。
+        本実装は単一アイテムのシンプルな注文を前提にしている。
+        """
+        query = """
+        query getFulfillmentOrder($id: ID!) {
+          order(id: $id) {
+            fulfillmentOrders(first: 1) { edges { node { id } } }
+          }
+        }
+        """
+        data = self._execute(query, {"id": order_id})
+        order = data.get("order")
+        if not order:
+            return None
+        edges = order["fulfillmentOrders"]["edges"]
+        return edges[0]["node"]["id"] if edges else None
+
+    def submit_fulfillment(
+        self, fulfillment_order_id: str, tracking_number: str, tracking_url: str | None, carrier: str | None
+    ) -> dict:
+        query = """
+        mutation fulfillmentCreate($fulfillment: FulfillmentInput!) {
+          fulfillmentCreate(fulfillment: $fulfillment) {
+            fulfillment { id status }
+            userErrors { field message }
+          }
+        }
+        """
+        tracking_info: dict = {"number": tracking_number}
+        if tracking_url:
+            tracking_info["url"] = tracking_url
+        if carrier:
+            tracking_info["company"] = carrier
+        variables = {
+            "fulfillment": {
+                "lineItemsByFulfillmentOrder": [{"fulfillmentOrderId": fulfillment_order_id}],
+                "trackingInfo": tracking_info,
+            }
+        }
+        data = self._execute(query, variables, "fulfillmentCreate")
+        return data["fulfillmentCreate"]["fulfillment"]

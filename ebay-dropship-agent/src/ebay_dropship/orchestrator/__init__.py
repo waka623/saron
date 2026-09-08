@@ -19,6 +19,7 @@ from ebay_dropship.channels.base import SalesChannel
 from ebay_dropship.config import Settings
 from ebay_dropship.orchestrator.do import run_do as _run_do
 from ebay_dropship.orders.purchase_channel import PurchaseChannel
+from ebay_dropship.pod import SupplierProvider
 from ebay_dropship.store.repository import SqlProposalRepository
 from ebay_dropship.supplier import SupplierAdapter
 
@@ -41,8 +42,12 @@ class Orchestrator:
         dry_run: bool = False,
         supplier: SupplierAdapter | None = None,
         purchase_channel: PurchaseChannel | None = None,
+        supplier_provider: SupplierProvider | None = None,
     ) -> list[Proposal | Exception]:
-        """承認済み(APPROVED)の publish/price_change/purchase を実行する。実体は orchestrator/do.py。"""
+        """承認済み(APPROVED)の publish/price_change/purchase/supplier_purchase を実行する。
+
+        実体は orchestrator/do.py。
+        """
         return _run_do(
             repository=repository,
             channel=channel,
@@ -51,5 +56,6 @@ class Orchestrator:
             dry_run=dry_run,
             supplier=supplier,
             purchase_channel=purchase_channel,
+            supplier_provider=supplier_provider,
         )
 

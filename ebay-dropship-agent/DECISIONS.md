@@ -1297,3 +1297,152 @@ ShopifyApiError)`(`_CHANNEL_API_ERRORS`)に広げた。理由: 広げないと�
   `research.evaluate_candidate`のような「相場データ(median_price)ベースの利益ガード」が
   そのままでは使えない。自己設定価格(店主が決めた想定売価)をベースにした簡素化版の判断ロジックを
   別途設計する必要がある(需要/競合の自動判定も無い前提での`proposal_type`判断も含む)。
+
+## S2: 受注→PODサプライヤー発注→追跡番号同期の実装(2026-09-08)
+
+S0(`SalesChannel`抽象導入)・S1(`ShopifyChannel`実装)の上に、S2として「Shopify受注→POD
+サプライヤーへの発注(レベルB=承認必須)→追跡番号のShopify書き戻し」と「Shopify向け利益ガード
+(自己設定価格版)」を実装した。eBay側のロジック(`execute_publish`/`execute_price_change`/
+`execute_purchase`/`evaluate_candidate`)は一切変更していない。
+
+### 追加したもの
+
+- `pod/__init__.py`(新規パッケージ): `SupplierProvider`(ABC。要求どおり
+  `submit_order(order, item) -> supplier_order_id` / `get_fulfillment(supplier_order_id) ->
+  FulfillmentInfo`の2メソッドのみ)、`SupplierOrder`/`SupplierOrderItem`/`FulfillmentInfo`/
+  `SupplierPurchaseLineItem`(dataclass)、`SupplierProviderError`。
+  **設計上の制約として記録**: メソッドが2つしかないため「発注直前に現在原価を再確認する」
+  手段が無い(eBayの`execute_purchase`が`supplier.fetch_stock(sku)`で行っている実行時再検査に
+  相当する仕組みをPOD側には作れない)。これは要求されたインターフェースをそのまま実装した結果の
+  制約であり、勝手にメソッドを追加して埋めることはしなかった(「発明しない」方針)。
+- `adapters/printify/`(新規): `client.py`(`PrintifyClient`、REST v1、`Authorization: Bearer`、
+  `create_order`/`get_order`)、`provider.py`(`PrintifyProvider(SupplierProvider)`。汎用
+  dataclassからPrintifyの`line_items`/`address_to`形状を組み立てる薄い変換層)、
+  `PrintifyApiError(SupplierProviderError)`。`config.py`に`printify_api_token`/
+  `printify_shop_id`(既定空文字)を追加、`.env.example`にキー名のみ追記(値は空、`.env`は
+  引き続きgitignore対象)。実認証情報が無くても`tests/fakes/printify_fake.py`
+  (`FakePrintifyBackend`、`httpx.MockTransport`ベース。既存の`ebay_inventory_fake.py`と同じ
+  流儀)で全機能を検証できる。
+- `approval/__init__.py`: `ProposalType.SUPPLIER_PURCHASE = "supplier_purchase"`を追加し
+  `WRITE_PROPOSAL_TYPES`に含めた。既存の`ProposalType.PURCHASE`(eBay/CSVサプライヤー向け)とは
+  意図的に別の値にした(用途・deny-by-default判定基準が異なるため。下記参照)。
+- `orders/__init__.py::evaluate_supplier_purchase`(新規、既存の`evaluate_purchase`は無変更):
+  Shopify注文の明細1件について、PODへ発注してよいかをPlan時点で判断する。deny-by-default:
+  配送先情報(`REQUIRED_SHIPPING_ADDRESS_FIELDS`)の欠落、または発注原価合計が
+  `settings.max_supplier_order_cost`(既定`$50.00`)を超過する場合は`hold`にし、絶対に自動発注
+  しない。境界値(ちょうど上限と同額)は通す、1セントでも超えたら`hold`にする、をテストで固定した。
+  生成する`supplier_purchase`提案は`requires_human_approval=True`固定であり、
+  `settings.enable_automated_supplier_purchase`の値をこの関数は一切参照しない
+  (`test_supplier_purchase_proposal_always_requires_human_approval_regardless_of_automation_flag`
+  で直接検証)。
+- `guardrails/gateway.py`: `PROFIT_GATED_TYPES`に`SUPPLIER_PURCHASE`は**意図的に含めていない**。
+  理由: `evaluate_supplier_purchase`はPlan段階で`estimated_profit=None`を設定する(利益率の判断は
+  出品時点の`evaluate_shopify_listing_candidate`の役割であり、発注承認段階は「原価が上限内か」
+  という別の判断のため)。`check_profit_guard`は`estimated_profit is None`を常にdenyとするため、
+  もし`PROFIT_GATED_TYPES`に含めると`supplier_purchase`はどんな場合でも実行不可能になってしまう
+  (実装中に一度追加して気づき、コメント付きで除外に戻した)。deny-by-defaultは
+  `evaluate_supplier_purchase`側の原価上限チェックと配送先必須チェックで担保する。
+- `research/__init__.py::calculate_shopify_net_profit` / `evaluate_shopify_listing_candidate`
+  (新規、既存の`evaluate_candidate`は無変更): Shopify向け利益ガード(自己設定価格版)。
+  `profit = 売値 − POD原価 − 送料 − 決済手数料(2.9%+$0.30)`を計算し、目標利益率15%・最低純利益
+  $5を満たすかで`recommended`を判定する。需要・競合の自動判定は一切行わない(Shopifyにはそれを
+  取得する公式APIが無いための簡素化。`test_does_not_use_demand_or_competition_fields`で
+  `estimated_demand`/`competition`キーが payload に存在しないことを直接検証)。
+- `channels/base.py`: 抽象メソッド`submit_fulfillment(order_id, tracking) -> dict`を追加。
+  `channels/ebay.py`: `NotImplementedError`(「eBayの書き込みFulfillment APIはこの実装で未対応。
+  eBay挙動は不変」という趣旨のコメント付き)。`channels/shopify.py`:
+  `get_fulfillment_order_id`→`submit_fulfillment`の2段でShopify注文をtracking付きfulfillする
+  実装(FulfillmentOrderが見つからなければ`ShopifyApiError`)。`adapters/shopify/client.py`の
+  `get_orders()`クエリも`shippingAddress`/`lineItems`を返すよう拡張し(既存キーは変更なし、
+  追加のみ)、`ShopifyChannel.get_orders()`のマッピングに`line_items`/`shipping_address`
+  (`ship_to_*`キーで`orders.REQUIRED_SHIPPING_ADDRESS_FIELDS`と対応)/`_shopify_order_gid`を
+  追加した。これに伴い既存のS1テスト`test_get_orders_maps_shopify_shape_to_ebay_shaped_dicts`が
+  厳密等値比較で1件失敗したため、モック応答と期待値の両方に新規キーを追記して修正した
+  (eBay側の`get_orders()`自体は無変更)。
+- `orchestrator/do.py`:
+  - `_SUPPLIER_PURCHASE_ERRORS = (SupplierProviderError, ShopifyApiError)`(既存の
+    `_CHANNEL_API_ERRORS`と同じ考え方の追加的な変更)。
+  - `execute_supplier_purchase(proposal, *, repository, channel, supplier_provider, settings,
+    calls_remaining, dry_run=False, source_description="")`: 承認済み`supplier_purchase`提案を
+    実行する。dry-runはPrintify等へ一切通信せず`dry_run_preview`をpayloadに記録するのみ。
+    live実行は`execute_purchase`/`execute_publish`と全く同じ`repository.claimed_execution`
+    (DBレベルの原子的な条件付き更新、SAVEPOINT)で発注権の獲得と`supplier_provider.submit_order`
+    呼び出しを直列化し(二重発注防止)、成功して初めて`status=executed`へ確定する。
+    `submit_order`が失敗すればSAVEPOINTがロールバックされ(`status`は`approved`に戻る)、
+    その後`repository.mark_failed`で理由付きの`failed`へ遷移させる。
+  - `sync_supplier_fulfillment(proposal, *, repository, channel, supplier_provider)`: 実行済み
+    (`status=EXECUTED`)の`supplier_purchase`提案についてのみ、`supplier_provider.get_fulfillment`
+    で発送状況を確認し、trackingが取得できていれば`channel.submit_fulfillment`でShopifyへ
+    書き戻す。まだ未発送ならpayloadを変更せず何もしない。既に書き戻し済み
+    (`payload["tracking_synced"] is True`)なら2回目以降はShopifyへ一切問い合わせない(冪等。
+    `test_sync_supplier_fulfillment_is_idempotent`で「2回目に呼ばれたら例外を送出するFake」に
+    差し替えて直接証明)。対象が`EXECUTED`でなければ`ComplianceError`を送出し処理を拒否する
+    (未承認・未実行の提案に対しては呼び出せない)。**新しい承認サイクルは要求していない**
+    ── これは新しい外部副作用の起点ではなく、既に人間が承認・実行した発注の履行(発送されたら
+    追跡番号を反映するだけ)の一部であるという判断による(`ComplianceError`によるEXECUTED限定
+    ガードが、この関数における唯一かつ意図的な安全ゲート)。
+  - `run_do`: `supplier_provider: SupplierProvider | None = None`引数を追加し、
+    `proposal_type is SUPPLIER_PURCHASE and supplier_provider`のとき`execute_supplier_purchase`を
+    呼ぶ分岐を追加(既存のeBay向け分岐は無変更)。`orchestrator/__init__.py`の
+    `Orchestrator.run_do`ラッパーも同様に更新。
+- `tests/test_guardrail_gateway.py`: 静的スキャン(AST)対象の書き込みメソッド名に`submit_order`/
+  `submit_fulfillment`を追加し、`ALLOWED_WRITE_CALL_RELPATHS`に`channels/shopify.py`を追加
+  (grepで`do.py`と`channels/shopify.py`以外に該当の属性アクセスが無いことを確認済み)。
+- 新規テスト: `tests/test_printify_client.py`(7件)、`tests/test_orders_supplier_purchase.py`
+  (7件、境界値テスト含む)、`tests/test_research_shopify.py`(5件)、
+  `tests/test_orchestrator_do_supplier_purchase.py`(9件、受注→発注提案→承認→submit_order→
+  tracking→Shopify書き戻しのend-to-end。すべてFake実装のみで実Shopify/実Printifyへは
+  一切接続しない)。既存`tests/test_channels.py`にも`submit_fulfillment`関連の4件を追加。
+
+### 実装中に見つけて対処した問題
+
+- `evaluate_supplier_purchase`が生成する`rationale`に卸・サプライヤー直送を示す語彙が無く、
+  `execute_side_effect`内の`check_not_retail_arbitrage`(小売アービトラージ疑いのdeny-by-default
+  ガード)に「仕入れ経路を確認できない」として弾かれていた。`rationale`の先頭に
+  「PODサプライヤーへの直送発注。」を追記して解消(判定ロジック自体は変更していない)。
+- `execute_supplier_purchase`の初版は`supplier_provider.submit_order`を`claimed_execution`で
+  囲っておらず、成功しても`status`が`approved`のまま変わらなかった(`execute_purchase`/
+  `execute_publish`が最終ステップを`claimed_execution`で確定しているのと同じパターンが必要
+  だったが、初版では抜けていた)。end-to-endテストの`status.value == "executed"`アサーションで
+  検出し、`execute_purchase`と同じ「中断からの再開は`supplier_order_id`の有無で判定し、無ければ
+  `claimed_execution`で発注権獲得と`submit_order`呼び出しを直列化する」構造に修正した。
+
+### 検証
+
+**全体テスト`362 passed`**(S1完了時点の`334 passed` + 上記4新規ファイル28件相当)。
+`test_orchestrator_do.py`/`test_orchestrator_do_withdraw_visibility.py`/
+`test_orchestrator_do_concurrency.py`/`test_orchestrator_do_shopify.py`(eBay・S1のShopify挙動を
+担保する既存テスト群)は**1件も変更しておらず全件green**。`ruff check .`もクリーン。実Shopify/
+実Printifyへの接続は本セッションからは行っていない(すべてFakeで検証)。
+
+### 発注が承認なしに走らないことの担保(要点)
+
+`execute_supplier_purchase`は他のすべての`execute_*`関数と全く同じ
+`guardrails.gateway.execute_side_effect`を経由する。この関数は冒頭で
+`if proposal.status != ProposalStatus.APPROVED: raise ComplianceError(...)`を必ずチェックし、
+これを満たさない限り渡された`executor`(実際に`supplier_provider.submit_order`を呼ぶ処理)は
+**一切呼ばれない**。この安全機構は`settings.enable_automated_supplier_purchase`フラグを
+一度も参照しない ── つまりこのフラグをTrueにしても、`execute_supplier_purchase`が承認なしの
+提案を実行することは無い(フラグは将来的に「自動発注を有効化するかどうか」の別の判断軸として
+予約されているだけで、現状のコードのどこもこのフラグを読んで承認チェックをバイパスしていない)。
+`test_execute_supplier_purchase_requires_approval`で未承認提案が`ComplianceError`で拒否される
+ことを直接検証し、`test_supplier_purchase_proposal_always_requires_human_approval_regardless_of_automation_flag`
+で提案生成そのものが`enable_automated_supplier_purchase=True`でも`requires_human_approval=True`
+固定であることを検証した。新しい承認バイパス経路を作っていないことは、`submit_order`を
+書き込みメソッド一覧に追加した`tests/test_guardrail_gateway.py`の既存の静的スキャンでも
+(`do.py`と`channels/shopify.py`以外からの呼び出しが無いことを)確認済み。
+
+### S3への引き継ぎ(今回は判断・実装していない)
+
+- **スケジュール実行での自走**: `run_do`は`supplier_provider`を受け取れるようになったが、
+  実際にAPScheduler等の定期実行ジョブから`execute_supplier_purchase`/`sync_supplier_fulfillment`
+  を呼び出す配線(cronジョブ・呼び出し順序・エラー時のリトライ方針)はまだ無い。
+- **レベルB運用の全体結線**: `evaluate_supplier_purchase`(Plan)→承認UI→`execute_supplier_
+  purchase`(Do)→`sync_supplier_fulfillment`(発送後の同期)という一連の流れは個々の関数として
+  実装・テスト済みだが、「Shopifyから新規注文を継続的に取得し、明細ごとに
+  `evaluate_supplier_purchase`を呼び、承認待ちキューに積む」というPlan側のポーリング/webhook
+  受信の仕組み自体はまだ存在しない(eBay版の`orders.ingest_orders`相当の接続がShopify版には無い、
+  というS1からの既知の未解決課題がそのまま残っている)。
+- **監視・エラー通知**: `mark_failed`で理由は記録されるが、失敗時に人間へ通知する仕組み
+  (メール/Slack等)は無い。特にPOD発注失敗・tracking同期失敗は顧客への配送遅延に直結するため、
+  S3ではこれらの失敗を能動的に検知して通知する仕組みの検討が必要。

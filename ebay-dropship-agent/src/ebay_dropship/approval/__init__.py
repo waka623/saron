@@ -14,6 +14,10 @@ class ProposalType(StrEnum):
     PRICE_CHANGE = "price_change"
     WITHDRAW = "withdraw"
     PURCHASE = "purchase"
+    # S2(2026-09-06、DECISIONS.md参照): Shopify注文→POD(Printify等)サプライヤーへの発注提案。
+    # 既存のPURCHASE(eBay向け、supplier/SupplierAdapter・orders/purchase_channel.py前提)とは
+    # 別の実行経路(pod/SupplierProvider前提)のため、値を分けている。
+    SUPPLIER_PURCHASE = "supplier_purchase"
     HOLD = "hold"
     NONE = "none"
 
@@ -40,7 +44,13 @@ class ProposalStatus(StrEnum):
 
 
 WRITE_PROPOSAL_TYPES = frozenset(
-    {ProposalType.PUBLISH, ProposalType.PRICE_CHANGE, ProposalType.WITHDRAW, ProposalType.PURCHASE}
+    {
+        ProposalType.PUBLISH,
+        ProposalType.PRICE_CHANGE,
+        ProposalType.WITHDRAW,
+        ProposalType.PURCHASE,
+        ProposalType.SUPPLIER_PURCHASE,
+    }
 )
 
 
