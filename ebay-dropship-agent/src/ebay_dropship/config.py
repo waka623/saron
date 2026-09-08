@@ -8,9 +8,17 @@ class Settings(BaseSettings):
     # 日本語コメントを含む.env/.env.exampleをロケール依存で読まれる余地を残さないため明示にする)。
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # S0(2026-09-06、DECISIONS.md参照): どの販路(SalesChannel実装)を使うかの選択。既定はeBay。
-    # "shopify"は現時点では未実装スタブ(channels/shopify.py)。
+    # S0(2026-09-06、DECISIONS.md参照): どの販路(SalesChannel実装)を使うかの選択。既定はeBay
+    # (誤爆防止。Shopifyは明示的に"shopify"を設定した場合のみ選ばれる)。
     channel: str = "ebay"
+
+    # --- Shopify Admin API(S1、channels/shopify.py) ---
+    # カスタムアプリのAdmin APIアクセストークンで認証する(OAuthアプリではない)。
+    shopify_store_domain: str = ""  # 例: "my-store.myshopify.com"
+    shopify_access_token: str = ""
+    # 仮定の既定値は置かない(明示設定必須)。https://shopify.dev/docs/api/usage/versioning で
+    # 現在のstableバージョンを確認して設定すること。
+    shopify_api_version: str = ""
 
     ebay_env: str = "sandbox"
     ebay_client_id: str = ""

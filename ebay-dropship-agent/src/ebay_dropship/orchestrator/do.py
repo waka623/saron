@@ -42,6 +42,7 @@ from typing import Any
 
 from ebay_dropship.adapters.ebay import EbayApiError, EbayOfferAlreadyExistsError
 from ebay_dropship.adapters.ebay.taxonomy import complete_required_aspects, required_aspect_names
+from ebay_dropship.adapters.shopify.client import ShopifyApiError
 from ebay_dropship.approval import Proposal, ProposalStatus, ProposalType
 from ebay_dropship.channels.base import SalesChannel
 from ebay_dropship.config import Settings
@@ -52,6 +53,13 @@ from ebay_dropship.orders.purchase_channel import PurchaseChannel, PurchaseOrder
 from ebay_dropship.pricing import calculate_net_profit
 from ebay_dropship.store.repository import AlreadyClaimedError, SqlProposalRepository
 from ebay_dropship.supplier import SupplierAdapter
+
+# S1(2026-09-06、DECISIONS.md参照): channelの実装によって送出される例外はEbayApiError/
+# ShopifyApiErrorのいずれもありうる。両方をここで一律に捕捉し、mark_failedで理由を記録してから
+# 再送出する(どちらの販路でも「失敗した副作用は必ずfailedとして理由付きで記録する」という
+# PROMPT.md第1章7項の要件を満たす)。例外階層自体を販路非依存に統一するかどうかはS1時点でも
+# 未着手(DECISIONS.mdのS1引き継ぎ論点のまま)。
+_CHANNEL_API_ERRORS = (EbayApiError, ShopifyApiError)
 
 
 def _inventory_item_payload(payload: Mapping[str, Any]) -> dict:
@@ -127,11 +135,11 @@ def execute_publish(
                 payload["item_specifics"] = complete_required_aspects(
                     payload.get("item_specifics") or {}, required_aspect_names(aspects)
                 )
-            except EbayApiError:
+            except _CHANNEL_API_ERRORS:
                 pass
             try:
                 channel.create_or_update_inventory_item(sku, _inventory_item_payload(payload))
-            except EbayApiError as exc:
+            except _CHANNEL_API_ERRORS as exc:
                 repository.mark_failed(p.id, decided_by="orchestrator", reason=f"inventory_item失敗: {exc}")
                 raise
             payload["ebay_item_id"] = sku
@@ -144,7 +152,7 @@ def execute_publish(
             except EbayOfferAlreadyExistsError as exc:
                 payload["ebay_offer_id"] = exc.existing_offer_id
                 payload["ebay_offer_reused"] = True
-            except EbayApiError as exc:
+            except _CHANNEL_API_ERRORS as exc:
                 repository.mark_failed(p.id, decided_by="orchestrator", reason=f"offer作成失敗: {exc}")
                 raise
             repository.update_payload(p.id, payload)
@@ -160,7 +168,7 @@ def execute_publish(
                 repository.update_payload(p.id, payload)
         except AlreadyClaimedError:
             raise
-        except EbayApiError as exc:
+        except _CHANNEL_API_ERRORS as exc:
             repository.mark_failed(p.id, decided_by="orchestrator", reason=f"publish失敗: {exc}")
             raise
 
@@ -222,7 +230,7 @@ def execute_price_change(
                 repository.update_payload(p.id, payload)
         except AlreadyClaimedError:
             raise
-        except EbayApiError as exc:
+        except _CHANNEL_API_ERRORS as exc:
             repository.mark_failed(p.id, decided_by="orchestrator", reason=f"価格変更失敗: {exc}")
             raise
 

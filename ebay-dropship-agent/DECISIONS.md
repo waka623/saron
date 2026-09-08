@@ -1177,3 +1177,123 @@ eBayをその裏へ(挙動不変・全テストgreen)。Shopify特有事情: 市
 - Shopify向けの利益ガード簡素化(自己設定価格ベース)の具体的な実装方法。
 - 需要/競合の自動判定が無いShopifyで、`research.evaluate_candidate`相当の判断をどう設計するか
   (現状のeBay版は`recent_sales_30d`/`competitor_count`前提のため、そのままでは使えない)。
+
+---
+
+## S1: ShopifyChannel実装(2026-09-06)
+
+S0で導入した`SalesChannel`の上にShopifyの実装を追加した。既存のeBay機能・全テストは保全し
+(最後に確認、後述)、安全設計(提案→承認→実行の3段、deny-by-default、CHANNEL既定=ebay)は不変。
+
+### 事前に見つけた、S0設計との食い違い(発明せず、判断してこう解決した)
+
+依頼文には`publish_listing(...)`という例が挙がっていたが、S0の`SalesChannel`にはそのメソッドは
+存在しない(S0では`create_or_update_inventory_item`/`create_offer`/`publish_offer`/
+`update_offer`というeBay既存メソッド名をそのまま採用し、その理由をDECISIONS.mdのS0エントリに
+明記済み)。依頼の「SalesChannel の既存シグネチャに合わせる」を文字通り優先し、**新しい
+`publish_listing`メソッドは追加せず、既存の4メソッドにShopifyの操作をマッピングした**
+(下記「ShopifyのAPI形状とSalesChannelの食い違いへの対応」)。もし本当に`publish_listing`という
+単一メソッドへの刷新を意図していた場合はご指摘ください(その場合`do.py`の書き換えが必要になり、
+影響範囲が変わる)。
+
+### ShopifyのAPI形状とSalesChannelの食い違いへの対応
+
+eBayのInventory APIは「SKUをキーにinventory_itemとofferを別々に作れる」設計だが、Shopifyの
+商品IDはShopify側が発行するopaqueなGIDで、SKUから直接引けない。かつ`orchestrator/do.py`は
+`create_or_update_inventory_item`の戻り値を保存せず(`payload["ebay_item_id"] = sku`を直接
+代入するだけ)、次の`create_offer(sku, payload)`にはSKUしか渡らない(do.py自体は変更していない、
+既存のeBay向けロジックそのまま)。そのため:
+
+1. `create_or_update_inventory_item(sku, payload)`: `productCreate`でDRAFT(非公開)状態の商品を
+   作成し、SKUをvariantに設定する。価格はまだ確定しないため`"0.00"`で仮作成する
+   (DRAFTなので外部には一切見えない。eBayの「publish_offerを呼ぶまで非公開」という安全性と
+   同じ)。
+2. `create_offer(sku, payload)`: SKUで商品を検索し直し(`ShopifyClient.find_by_sku`)、確定価格を
+   設定する。戻り値`{"offerId": <Shopify商品GID>}`(do.pyが`offer["offerId"]`として
+   `payload["ebay_offer_id"]`に保存し、次のpublish_offerに渡す。eBayのofferIdの代わりに
+   Shopifyの商品GIDを使うだけで、do.py側のコードは無変更で動く)。
+3. `publish_offer(offer_id)`: `offer_id`=Shopify商品GID。`productUpdate(status: ACTIVE)`で
+   初めて公開する。戻り値`{"listingId": offer_id}`。
+4. `update_offer(offer_id, payload)`: 価格改定。商品の既定variantを引いてから価格を更新する。
+5. `get_item_aspects_for_category`: eBay Taxonomy固有の概念(カテゴリ必須アスペクト)は
+   Shopifyに無いため、常に空リストを返す(「補完対象なし」が正しい振る舞い。エラーではない)。
+6. `get_orders`: Shopifyの注文をeBay版`get_orders()`と同じdict形状
+   (`orderId`/`orderFulfillmentStatus`/`pricingSummary.total.value`/`currency`)にマッピングする。
+   `orderFulfillmentStatus`の値そのもの(eBay: `NOT_STARTED`等、Shopify: `UNFULFILLED`等)は
+   プラットフォームごとに語彙が異なるため正規化していない(Shopify側の生の文字列をそのまま渡す)。
+
+**未解決のまま残した設計上の負債(S0由来。今回は範囲を広げなかった)**: `SalesChannel`の各
+メソッドに渡る`payload`引数は、`do.py::_inventory_item_payload`/`_offer_payload`が常にeBayの
+Inventory API形状(`payload["product"]["title"]`、`payload["pricingSummary"]["price"]["value"]`
+等)で組み立てたものであり、`ShopifyChannel`はその中からeBay形状を前提に値を取り出している
+(`channels/shopify.py`のdocstringに明記)。より販路中立なpayload表現にするには`do.py`の
+ペイロード構築自体を見直す必要があり、それは「既存のeBay機能を壊さない」というS1の制約を
+超えるためS2以降の判断とした。
+
+### do.pyへの小さな追加変更(唯一、S0後の「凍結」コードに触れた箇所)
+
+`execute_publish`/`execute_price_change`の`except EbayApiError`を`except (EbayApiError,
+ShopifyApiError)`(`_CHANNEL_API_ERRORS`)に広げた。理由: 広げないと、Shopify書き込み失敗時に
+`repository.mark_failed`が呼ばれず(監査ログに理由が残らず)`ShopifyApiError`が生のまま
+`run_do`の外側の汎用`except Exception`まで抜けてしまう(バッチは落ちないが、proposalが
+`failed`として理由付きで記録されない。PROMPT.md第1章7項「すべての実行された副作用は監査ログに
+残す」に反する)。`except`をタプルに広げるだけの追加的な変更で、eBayの既存分岐・戻り値・
+例外送出タイミングは一切変えていない(`tests/test_orchestrator_do*.py`全件が無変更のままgreenで
+これを確認済み)。
+
+### 追加したもの
+
+- `adapters/shopify/transport.py`: `ShopifyTransport`(ABC)、`HttpShopifyTransport`(実装。
+  `SHOPIFY_API_VERSION`未設定なら`ShopifyTransportError`で即座に失敗。仮定の既定値は置いていない)。
+- `adapters/shopify/client.py`: `ShopifyClient`(GraphQL Admin API)。要確認事項(モジュール
+  docstringに明記): (a) 使用APIバージョンは断定できないため設定必須、(b) variant作成/更新が
+  `productCreate`へのインライン指定で通るか`productVariantsBulkCreate`/
+  `productVariantsBulkUpdate`への分離が必要かはAPIバージョン依存、(c) `publish_product`は
+  `productUpdate(status: ACTIVE)`のみで実装しており、ストアの販売チャネル設定によっては
+  別途`publishablePublish`が必要な場合がある。**実装前に必ずShopify公式ドキュメントで
+  現在のスキーマを確認すること**(このセッションから実Shopifyストアへ接続して検証できないため)。
+- `channels/shopify.py`: `ShopifyChannel`(スタブから実装に変更。上記のマッピングを実装)。
+- `channels/__init__.py`: `create_channel`が`CHANNEL=shopify`のとき
+  `ShopifyChannel(ShopifyClient(HttpShopifyTransport(...)))`を構築するよう更新。認証情報
+  未設定のまま`shopify`を選ぶと`ShopifyTransportError`で即座に失敗する(deny by default。
+  実際にAPIを叩く前に気づける)。
+- `config.py`: `shopify_store_domain` / `shopify_access_token` / `shopify_api_version`
+  (すべて既定空文字)を追加。`.env.example`にもキー名のみ追記(値は空、`.env`自体は引き続き
+  gitignore対象)。
+- `orchestrator/do.py`: 上記except拡張のみ。
+- `tests/fakes/shopify_transport_fake.py`(新規): `FakeShopifyTransport`。
+  `research/market_data.py::MockMarketDataProvider`と同じ流儀(ハンドラ関数を差し込むだけで
+  実HTTPを一切使わない)。
+- `tests/test_shopify_client.py`(新規、11件): `ShopifyClient`の各GraphQL操作の単体テスト。
+- `tests/test_channels.py`(更新): S0時点の「全メソッドがNotImplementedError」テストを、実装後の
+  正しい振る舞い(CHANNEL選択・食い違い解決のマッピング・空アスペクトリスト・注文マッピング)の
+  テストに差し替えた(15件)。
+- `tests/test_orchestrator_do_shopify.py`(新規、5件): `execute_publish`/`execute_price_change`を
+  **実際にorchestrator/do.py経由で**ShopifyChannelに対して実行し、提案→承認→実行が完走すること、
+  dry-runがShopifyへ一切通信しないこと、失敗時に`mark_failed`で理由が記録されること、未承認
+  proposalは実行されない(deny-by-default)ことを検証(要件4「提案→承認→実行の既存フローを通す」の
+  直接的な証拠)。
+
+### 検証
+
+**全体テスト`330 passed`**(S1着手前の`312 passed` + 新規`test_shopify_client.py`11件 +
+`test_orchestrator_do_shopify.py`5件 + `test_channels.py`更新による純増2件)。
+`test_orchestrator_do.py`/`test_orchestrator_do_withdraw_visibility.py`/
+`test_orchestrator_do_concurrency.py`(eBayの挙動を担保する既存テスト群)は**1件も変更しておらず
+全件green** ── これがeBay機能の保全の証拠。`ruff check`もクリーン。実Shopify/実eBayへの接続は
+本セッションからは行っていない(認証情報も無い)。
+
+### S2への引き継ぎ(今回は判断・実装していない)
+
+- **サプライヤー発注(purchase)= 承認[B]**: Shopify版の受注後、サプライヤーへの発注提案
+  (`orders`/`execute_purchase`相当)をどう組み込むか。現状の`execute_purchase`はeBay/Shopifyに
+  依存しない設計(supplier側のみ)だが、Shopify注文の`get_orders()`出力を`orders.ingest_orders`
+  相当のパイプラインへどう接続するか(現状、eBAY版もこの接続自体が未実装であることが今回の
+  調査で判明した。DECISIONS.md本エントリ「ShopifyのAPI形状とSalesChannelの食い違いへの対応」の
+  `get_orders`の節参照)。
+- **追跡番号の同期(発送登録)**: S0/S1のいずれでも範囲外のまま(`SalesChannel`に発送登録系の
+  メソッドは無い。eBay側にも`submit_fulfillment`相当の実装は無い)。
+- **利益ガードの自己設定価格版**: Shopifyには市場相場を取得できる公式APIが無いため、
+  `research.evaluate_candidate`のような「相場データ(median_price)ベースの利益ガード」が
+  そのままでは使えない。自己設定価格(店主が決めた想定売価)をベースにした簡素化版の判断ロジックを
+  別途設計する必要がある(需要/競合の自動判定も無い前提での`proposal_type`判断も含む)。
