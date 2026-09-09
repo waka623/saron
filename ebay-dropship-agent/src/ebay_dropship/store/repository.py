@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy import update as sa_update
 from sqlalchemy.orm import Session
 
-from ebay_dropship.approval import ApprovalQueue, Proposal, ProposalStatus
+from ebay_dropship.approval import ApprovalQueue, Proposal, ProposalStatus, ProposalType
 from ebay_dropship.store.models import ProposalRecord
 
 # F5(adversarial security review, 2026-08-29): eBay APIの上流エラー本文(response.text)が
@@ -101,6 +101,14 @@ class SqlProposalRepository(ApprovalQueue):
 
     def list_approved(self) -> list[Proposal]:
         stmt = select(ProposalRecord).where(ProposalRecord.status == ProposalStatus.APPROVED)
+        return [_to_domain(r) for r in self._session.scalars(stmt)]
+
+    def list_by_type(self, proposal_type: ProposalType) -> list[Proposal]:
+        """S3: 全ステータス横断でproposal_typeが一致するものを返す(自走ループの冪等性チェック用。
+
+        例: 同じShopify注文明細に対して重複したsupplier_purchase提案を作らないための既存検索)。
+        """
+        stmt = select(ProposalRecord).where(ProposalRecord.proposal_type == proposal_type)
         return [_to_domain(r) for r in self._session.scalars(stmt)]
 
     def get(self, proposal_id: str) -> Proposal:

@@ -48,6 +48,21 @@ def test_cycle_run_once_demo_enqueues_three_proposals(cli_db):
     assert "price_change" in list_result.output
 
 
+def test_cycle_run_autopilot_demo_dry_run_does_not_auto_approve_by_default(cli_db):
+    """S3: `--demo`はPlan/Actを実行するだけ。既定(autonomy_enabled=False)では自動承認しない。"""
+    runner = CliRunner()
+    runner.invoke(cli, ["demo", "seed"])
+
+    result = runner.invoke(cli, ["cycle", "run-autopilot", "--demo"])
+
+    assert result.exit_code == 0
+    assert "auto_approved=0" in result.output
+    assert "errors=0" in result.output
+
+    list_result = runner.invoke(cli, ["proposals", "list"])
+    assert "publish" in list_result.output  # 自動承認されていないのでPENDINGのまま一覧に残る
+
+
 def test_cycle_run_once_without_demo_flag_still_reports_zero(cli_db):
     """既存の既定動作(--demo無し)が壊れていないことの回帰防止。"""
     runner = CliRunner()

@@ -60,6 +60,18 @@ class Settings(BaseSettings):
     # 実発注(自動)は実サプライヤー統合+明示的go-liveまでOFF固定。安易に変更しないこと(DECISIONS.md参照)。
     enable_automated_supplier_purchase: bool = False
 
+    # --- S3: スケジュール自走(オプトイン、レベルB。DECISIONS.md参照) ---
+    # 既定はすべて安全側(自走オフ)。何も設定しなければ人間の承認なしに何も自動実行されない。
+    autonomy_enabled: bool = False
+    # "お金が動かない"publish系のみが対象(guardrails/autonomy.pyのAUTO_APPROVABLE_TYPESでコード固定。
+    # このフラグをTrueにしても、supplier_purchase等の金銭・破壊系が自動承認されることはない)。
+    auto_approve_publish: bool = False
+    # 1回のrun-cycleで自動承認してよい件数の上限(暴走防止。小さめの既定値)。
+    max_auto_actions_per_run: int = 3
+    # 緊急停止スイッチ。Trueの間はautonomy_enabledの値に関わらず自動承認を一切行わない
+    # (autonomy_enabledと分離しているのは、「これだけ倒せば確実に止まる」独立した経路を残すため)。
+    autonomy_kill_switch: bool = False
+
     # 金額・率は Decimal 固定(float禁止)。pydantic-settings は .env の文字列から Decimal へ直接変換する。
     # 2026-09-06: 経営判断により20%→15%へ引き下げ(DECISIONS.md参照)。min_net_profit($5)は不変。
     target_margin_pct: Decimal = Decimal(15)

@@ -17,6 +17,8 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import ClassVar
 
+import httpx
+
 from ebay_dropship.adapters.ebay.rate_limit import CallBudget
 from ebay_dropship.approval import Proposal, ProposalType
 
@@ -79,6 +81,34 @@ class DedupingNotifier(Notifier):
         self.inner.notify(alert)
 
 
+class WebhookNotifier(Notifier):
+    """S3: 任意実装。AlertをJSONとして指定URLへPOSTする(Slack Incoming Webhook等を想定)。
+
+    通知の送信失敗(ネットワーク不調・URL誤設定等)で監視対象の本処理(自走ループ)自体を
+    落としてはならないため、送信失敗は例外を再送出せずログに記録するだけにする。
+    """
+
+    def __init__(self, webhook_url: str, *, http_client: httpx.Client | None = None) -> None:
+        self._webhook_url = webhook_url
+        self._client = http_client or httpx.Client(timeout=10.0)
+
+    def notify(self, alert: Alert) -> None:
+        try:
+            response = self._client.post(
+                self._webhook_url,
+                json={
+                    "category": alert.category,
+                    "severity": alert.severity.value,
+                    "message": alert.message,
+                    "related_proposal_id": alert.related_proposal_id,
+                    "reason": alert.reason,
+                },
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.error("webhook通知の送信に失敗しました(処理は継続します): %s", exc)
+
+
 _STOCK_DIVERGENCE_MARKERS = ("在庫", "陳腐化", "同期ラグ", "SKUが見つかりません")
 
 
@@ -108,6 +138,33 @@ def notify_for_proposal(proposal: Proposal, notifier: Notifier) -> None:
     alert = alert_for_proposal(proposal)
     if alert is not None:
         notifier.notify(alert)
+
+
+def alert_for_supplier_purchase_pending_approval(proposal: Proposal) -> Alert | None:
+    """S3: supplier_purchase提案が生成され、人間の承認待ちになったことを通知する。
+
+    レベルB方針の可視化: この提案は自動承認され得ない(guardrails/autonomy.pyのコード固定の
+    許可リストにsupplier_purchaseは含まれない)ため、人間が能動的に承認しない限りいつまでも
+    pendingのままになる。運用者がこれに気づけるよう、生成の時点で通知する。
+    """
+    if proposal.proposal_type is not ProposalType.SUPPLIER_PURCHASE:
+        return None
+    return Alert(
+        category="supplier_purchase_pending_approval",
+        severity=AlertSeverity.WARNING,
+        message=f"人間の承認待ち: {proposal.summary}",
+        related_proposal_id=proposal.id,
+        reason=proposal.rationale,
+    )
+
+
+def alert_for_error(context: str, exc: Exception) -> Alert:
+    """S3: 自走ループ内で発生したエラーを通知する(監視要件)。"""
+    return Alert(
+        category="autopilot_error",
+        severity=AlertSeverity.CRITICAL,
+        message=f"{context}: {exc}",
+    )
 
 
 def alert_for_rate_budget(budget: CallBudget) -> Alert | None:

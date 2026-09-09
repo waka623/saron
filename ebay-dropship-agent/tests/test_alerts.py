@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import httpx
+
 from ebay_dropship.adapters.ebay.rate_limit import CallBudget
 from ebay_dropship.alerts import (
     Alert,
@@ -11,8 +13,11 @@ from ebay_dropship.alerts import (
     DedupingNotifier,
     LoggingNotifier,
     Notifier,
+    WebhookNotifier,
+    alert_for_error,
     alert_for_proposal,
     alert_for_rate_budget,
+    alert_for_supplier_purchase_pending_approval,
     notify_for_proposal,
 )
 from ebay_dropship.approval import Priority, Proposal, ProposalType, RiskLevel
@@ -163,3 +168,57 @@ def test_alert_for_rate_budget_critical_when_exhausted():
     alert = alert_for_rate_budget(budget)
     assert alert is not None
     assert alert.severity == AlertSeverity.CRITICAL
+
+
+# --- S3: 承認待ち通知・エラー通知・webhook実装 ---
+
+
+def test_alert_for_supplier_purchase_pending_approval_only_for_that_type():
+    supplier_purchase = _proposal(ProposalType.SUPPLIER_PURCHASE, "PODサプライヤーへの直送発注。")
+    alert = alert_for_supplier_purchase_pending_approval(supplier_purchase)
+    assert alert is not None
+    assert alert.severity == AlertSeverity.WARNING
+    assert alert.related_proposal_id == "p1"
+
+    assert alert_for_supplier_purchase_pending_approval(_proposal(ProposalType.PUBLISH, "r")) is None
+    assert alert_for_supplier_purchase_pending_approval(_proposal(ProposalType.HOLD, "r")) is None
+
+
+def test_alert_for_error_is_critical():
+    alert = alert_for_error("受注取得に失敗しました", RuntimeError("boom"))
+    assert alert.severity == AlertSeverity.CRITICAL
+    assert "受注取得に失敗しました" in alert.message
+    assert "boom" in alert.message
+
+
+def test_webhook_notifier_posts_alert_as_json():
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    notifier = WebhookNotifier(
+        "https://example.test/hooks/alert", http_client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
+
+    notifier.notify(Alert(category="auto_approved", severity=AlertSeverity.INFO, message="自動承認: s", related_proposal_id="p1"))
+
+    assert len(captured) == 1
+    body = captured[0].content
+    assert b"auto_approved" in body
+    assert b"p1" in body
+
+
+def test_webhook_notifier_swallows_http_errors(caplog):
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("boom", request=request)
+
+    notifier = WebhookNotifier(
+        "https://example.test/hooks/alert", http_client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
+    caplog.set_level("ERROR", logger="ebay_dropship.alerts")
+
+    notifier.notify(Alert(category="autopilot_error", severity=AlertSeverity.CRITICAL, message="m"))  # 例外を送出しない
+
+    assert "webhook通知の送信に失敗しました" in caplog.text

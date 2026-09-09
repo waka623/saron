@@ -137,6 +137,19 @@ def test_executed_is_a_terminal_state(repo):
         repo.mark_failed(saved.id, decided_by="orchestrator", reason="retry")
 
 
+def test_list_by_type_returns_all_statuses_for_matching_type(repo):
+    """S3: 自走ループの冪等性チェック(重複proposal検出)用。全ステータス横断で検索できること。"""
+    a = repo.enqueue(_sample_proposal(proposal_type=ProposalType.SUPPLIER_PURCHASE))
+    repo.approve(a.id, decided_by="alice")
+    repo.enqueue(_sample_proposal(proposal_type=ProposalType.SUPPLIER_PURCHASE))
+    repo.enqueue(_sample_proposal(proposal_type=ProposalType.PRICE_CHANGE))
+
+    result = repo.list_by_type(ProposalType.SUPPLIER_PURCHASE)
+
+    assert len(result) == 2
+    assert {p.status for p in result} == {ProposalStatus.APPROVED, ProposalStatus.PENDING}
+
+
 def test_unknown_proposal_id_raises_not_found(repo):
     with pytest.raises(ProposalNotFoundError):
         repo.approve("does-not-exist", decided_by="alice")

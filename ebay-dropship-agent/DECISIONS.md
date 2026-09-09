@@ -1446,3 +1446,138 @@ S0(`SalesChannel`抽象導入)・S1(`ShopifyChannel`実装)の上に、S2とし�
 - **監視・エラー通知**: `mark_failed`で理由は記録されるが、失敗時に人間へ通知する仕組み
   (メール/Slack等)は無い。特にPOD発注失敗・tracking同期失敗は顧客への配送遅延に直結するため、
   S3ではこれらの失敗を能動的に検知して通知する仕組みの検討が必要。
+
+## S3: スケジュール自走(レベルB。オプトイン、既定は自走オフ)の実装(2026-09-09)
+
+S0〜S2で作った`SalesChannel`/`ShopifyChannel`/`SupplierProvider`/`evaluate_supplier_purchase`の
+上に、S3として「人間の介在なしに定期実行できる自走ループ」を実装した。レベルBの定義
+(お金が動かないpublish系のみ自動承認可、supplier_purchase等の金銭・破壊系は常に人間の承認必須)を
+コードレベルで厳守し、既存のeBayロジック・テストは一切変更していない。
+
+### 追加したもの
+
+- `guardrails/autonomy.py`(新規): 自動承認の対象範囲を定義する。`AUTO_APPROVABLE_TYPES =
+  frozenset({ProposalType.PUBLISH})`をこのモジュール内にハードコードし、設定ファイルからは
+  変更できないようにした(レベルBの核心的な安全策。`.env`の書き間違いで`supplier_purchase`が
+  自動承認対象に広がる事故を構造的に防ぐ)。`autonomy_active(settings)`は
+  `autonomy_kill_switch`が最優先(Trueなら`autonomy_enabled`の値に関わらず問答無用でFalse)。
+- `config.py`: `autonomy_enabled`(既定False)・`auto_approve_publish`(既定False)・
+  `max_auto_actions_per_run`(既定3)・`autonomy_kill_switch`(既定False)を追加。すべて安全側の
+  既定値(何も設定しなければ自動承認は一切発生しない)。`.env.example`にもキーのみ追記。
+- `orchestrator/autopilot.py`(新規): 自走ループ本体`run_autopilot_cycle`。1サイクルの手順:
+  1. Plan(`orchestrator/cycle.py::run_cycle`にそのまま委譲。cycle.py自体は無変更で、
+     do.pyへの参照が無いことを検査する既存の静的テストの対象外〈autopilot.pyは新規ファイル〉)。
+  2. 自走が有効なら、PENDINGのうち`AUTO_APPROVABLE_TYPES`に該当するもの(=publishのみ)だけを
+     `repository.approve(id, decided_by="autopilot")`で承認する。`max_auto_actions_per_run`で
+     1回あたりの件数を制限する。ここではguardrailの合否判定を一切行わない(判定は次のDoフェーズが
+     行う。判定ロジックを二重に持たない)。
+  3. `order_to_items`が渡されていれば受注を取得し、まだ提案化していない明細についてのみ
+     `evaluate_supplier_purchase`を呼ぶ(冪等: `repository.list_by_type(SUPPLIER_PURCHASE)`で
+     既存の提案の(注文ID, SKU)を集め、同じ組み合わせは再作成しない)。ここで作る提案は
+     常に`requires_human_approval=True`固定であり、このステップ自体が承認することは無い。
+  4. `orchestrator/do.py::run_do`を1回呼ぶ(新しい実行経路は作らない。自動承認されたpublishと、
+     既に人間が承認済みだったsupplier_purchase等をまとめて実行する。3で新たに積んだ
+     supplier_purchaseはまだPENDINGなのでここでは実行されない)。
+  5. `supplier_provider`が渡されていれば、EXECUTED状態でまだ`tracking_synced`でない
+     supplier_purchase提案について`sync_supplier_fulfillment`を呼ぶ(受注取得の有無に関わらず、
+     過去のサイクルでEXECUTEDになった分も拾う。新しい承認は要求しない、というS2の設計を継承)。
+  `order_to_items: Callable[[dict], list[SupplierPurchaseLineItem]]`は呼び出し側が渡す変換関数
+  (`make_order_to_supplier_items(cost_lookup)`ヘルパーを用意)。Shopify注文データ自体にはPOD原価が
+  含まれないため、SKUごとの原価を引く`cost_lookup`は呼び出し側のカタログ実装に委ねる(実カタログ
+  統合はS3の範囲外。下記「実運用の残作業」参照。発明しない方針)。
+- `alerts/__init__.py`: `WebhookNotifier`(任意実装。AlertをJSONとして指定URLへPOST。送信失敗は
+  ログに記録するだけで例外を再送出せず、監視対象の本処理を止めない)、
+  `alert_for_supplier_purchase_pending_approval`(supplier_purchase提案が生成され人間の承認待ちに
+  なったことを通知)、`alert_for_error`(自走ループ内のエラーを通知)を追加。既存の
+  `LoggingNotifier`(既定実装)・`notify_for_proposal`(hold/withdrawの通知)はS2までで既に
+  実装済みだったものをそのまま再利用している。
+- `store/repository.py::list_by_type(proposal_type)`(新規、読み取り専用): 全ステータス横断で
+  proposal_typeが一致するものを返す。自走ループの冪等性チェック(重複proposal検出)・tracking同期
+  対象の探索に使う。
+- `adapters/printify/__init__.py::create_supplier_provider(settings)`(新規): `channels.
+  create_channel`と同じ方針で、Printify認証情報が未設定ならNoneを返す(fail-safe。
+  `run_do`/`run_autopilot_cycle`が`supplier_provider=None`のとき関連処理を丸ごとスキップする
+  既存の挙動と揃えている)。
+- `cli/__init__.py::cycle run-autopilot`(新規コマンド): `--live`(既定はdry-run)・
+  `--demo`(demo.pyのPlan/Actフィクスチャを使う。受注取得〜supplier_purchase系はカタログ統合が
+  無いため対象外)・`--interval-seconds`(指定するとAPSchedulerの`BlockingScheduler`で定期実行する
+  常駐プロセスになる。省略時は1回だけ実行して終了する、cronから叩く運用向け)。定期実行時は
+  既存の`orchestrator/scheduler.py::CycleScheduler`(single-flight制御)をそのまま再利用した
+  (新しいスケジューラ機構を作らない)。
+
+### レベルBが守られていることの担保(要点)
+
+1. **自動承認の対象範囲はコード固定**: `guardrails/autonomy.py::AUTO_APPROVABLE_TYPES`は
+   `frozenset({ProposalType.PUBLISH})`とハードコードされており、`Settings`のどの値をどう
+   組み合わせても`SUPPLIER_PURCHASE`等が自動承認対象になることは無い(設定ミスで広がらない)。
+   `test_supplier_purchase_never_auto_approved_even_with_automation_flag_enabled`で、
+   `autonomy_enabled=True`・`auto_approve_publish=True`・さらに紛らわしい既存フラグ
+   `enable_automated_supplier_purchase=True`まで全部Trueにしても、supplier_purchaseは
+   PENDINGのまま・自動承認リストにも入らないことを直接検証した。
+2. **自動承認された提案も、他のあらゆる承認済み提案と全く同じ経路で実行される**: 自動承認
+   ステップ(`_auto_approve_eligible`)は`repository.approve()`でstatusをAPPROVEDに変えるだけで、
+   実際の実行は既存の`orchestrator/do.py::run_do`→`guardrails.gateway.execute_side_effect`
+   (status==APPROVEDでなければComplianceError、利益ガード等の全guardrailを実行時に再検査)を
+   経由する。新しい実行経路・新しいバイパスは一切作っていない。
+3. **既定は完全に安全側**: `autonomy_enabled`・`auto_approve_publish`・`autonomy_kill_switch`は
+   すべて既定False。何も設定しなければ`_auto_approve_eligible`は空リストを返し、
+   `run_autopilot_cycle`が実行する副作用は「この呼び出しより前に人間が承認済みだった提案」だけに
+   なる(S3以前と同じ挙動。`test_autonomy_disabled_by_default_does_not_auto_approve_anything`で
+   検証)。`dry_run`の既定値も`True`(CLIは`--live`を付けない限りdry-run)。
+4. **kill-switchは独立した優先経路**: `autonomy_kill_switch=True`は`autonomy_enabled`の値に
+   関わらず自動承認を止める(`test_kill_switch_overrides_autonomy_enabled`)。運用者が
+   「これだけ倒せば確実に止まる」という単純な手段を持てるようにするため、あえて
+   `autonomy_enabled`と分離した独立のフラグにした。
+5. **暴走防止の上限**: `max_auto_actions_per_run`で1回のサイクルあたりの自動承認件数を制限する
+   (`test_max_auto_actions_per_run_caps_auto_approval`)。
+
+### 冪等性の設計
+
+- 受注取得→supplier_purchase提案の生成: 同じ(注文ID, SKU)の組み合わせについて、
+  `repository.list_by_type(SUPPLIER_PURCHASE)`で既存の提案(全ステータス横断)を確認し、
+  既にあれば再作成しない。一度holdやsupplier_purchaseとして提案化された注文明細は、その後の
+  サイクルで自動的には再評価されない(状況が変わって再評価したい場合は人間の操作が必要になる、
+  という割り切り。DECISIONS.mdに残す既知の制約)。
+- 実行(Do): `execute_supplier_purchase`/`execute_publish`はS2までに実装済みの
+  `repository.claimed_execution`(DBレベルの原子的な条件付き更新)で二重実行を防いでおり、
+  `run_autopilot_cycle`を何度呼んでも安全(既にEXECUTEDの提案は`list_approved()`に含まれない
+  ため再実行されない)。
+- tracking同期: `payload["tracking_synced"]`フラグで冪等(S2から継承)。
+
+### 実運用の残作業(このセッションでは判断・実装していない)
+
+- **実認証情報での動作確認**: 本セッションから実Shopify/実Printifyへ接続して検証できないため、
+  すべてFake(`FakeShopifyTransport`/`FakePrintifyBackend`)での検証に留まる。実認証情報を
+  `.env`に設定した後、まずSandbox相当の環境(または少数の実商品)で`--live`無しのdry-run→
+  ログ確認→少数の商品に限定した`--live`、の順で段階的に検証すること。
+- **受注→POD原価のカタログ統合**: `order_to_items`(≒Shopify注文のSKUからPOD原価を引く処理)の
+  実装はこのセッションの範囲外(実商品カタログが無いため)。CLIの`cycle run-autopilot`は現時点で
+  `order_to_items`を渡していない(受注取得〜supplier_purchase系は動作しない)。実カタログ
+  (SKU→POD原価の対応表)を用意し、`make_order_to_supplier_items(cost_lookup)`に渡すこと。
+- **段階的にautonomyを有効化する手順(推奨)**:
+  1. `AUTONOMY_ENABLED=false`のまま(既定)`cycle run-autopilot --live`をcron等で定期実行し、
+     人間による通常の承認フローが自動化された受注取得・実行(Do)まで問題なく回ることを確認する。
+  2. `AUTO_APPROVE_PUBLISH=true`・`AUTONOMY_ENABLED=true`にし、`MAX_AUTO_ACTIONS_PER_RUN`を
+     小さい値(1〜3程度)にした状態で数日運用し、自動承認されたpublishの品質(利益ガードの
+     再検査で弾かれていないか、`check_publish_payload_complete`で弾かれていないか)を
+     ログ(`autopilot_cycle_result`)で確認する。
+  3. 問題が無ければ`MAX_AUTO_ACTIONS_PER_RUN`を段階的に引き上げる。supplier_purchaseは
+     このセッションの設計上、恒久的に人間の承認が必須のままである(将来これを変える場合は、
+     コードレベルの許可リスト自体の変更が必要になる、重い意思決定であることをDECISIONS.mdに
+     明記しておく)。
+- **監視の実配線**: `WebhookNotifier`はSlack Incoming Webhook等を想定した実装のみ用意した。
+  実際の通知先URLの設定・エラー時のエスカレーション先の運用(誰が一次対応するか)は未定義。
+
+### 検証
+
+**全体テスト`383 passed`**(S2完了時点の`362 passed` + 本セッションの新規21件:
+`test_orchestrator_autopilot.py`9件〈レベルBの核心を直接検証するテストを含む〉、
+`test_guardrails_autonomy.py`4件、`test_alerts.py`への追加4件、
+`test_store_repository.py`への追加1件、`test_printify_provider_factory.py`2件、
+`test_cli_demo.py`への追加1件)。既存の`test_orchestrator_do*.py`/`test_orchestrator_cycle.py`
+(eBay・S1/S2の挙動を担保する既存テスト群)は1件も変更しておらず全件green。
+`test_orchestrator_cycle.py::test_cycle_module_never_references_do_phase_execution`
+(cycle.pyがdo.pyを参照しないことの静的検査)・`test_guardrail_gateway.py`の書き込みメソッド
+バイパス検査もそのままgreen(`autopilot.py`はeBay/Shopify/Printifyの書き込みメソッドを
+直接呼んでおらず、`run_do`/`repository`経由のみ)。`ruff check .`もクリーン。実Shopify/
+実Printify/実eBay Sandboxへの接続は本セッションからは行っていない(すべてFakeで検証)。

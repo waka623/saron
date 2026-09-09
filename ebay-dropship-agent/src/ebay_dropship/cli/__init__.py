@@ -152,6 +152,108 @@ def run_cycle_once(demo: bool) -> None:
         click.echo(f"  error: {exc}", err=True)
 
 
+@cycle.command("run-autopilot")
+@click.option(
+    "--live",
+    is_flag=True,
+    default=False,
+    help="指定しない場合はdry_run(何も外部へ送信しない)。指定すると実際に副作用(publish送信・POD発注等)を実行する。",
+)
+@click.option(
+    "--demo",
+    "demo_mode",
+    is_flag=True,
+    default=False,
+    help="demo.pyのフィクスチャでPlan/Actを実行する(受注取得〜supplier_purchase系は対象外。実カタログ統合が未着手のため)。",
+)
+@click.option("--calls-remaining", default=100, show_default=True, type=int)
+@click.option(
+    "--interval-seconds",
+    "interval_seconds",
+    type=int,
+    default=None,
+    help=(
+        "指定するとAPSchedulerでこの間隔で定期実行する常駐プロセスになる(Ctrl+Cで停止)。"
+        "省略時は1回だけ実行して終了する(cronから叩く運用向け)。"
+    ),
+)
+def run_autopilot(live: bool, demo_mode: bool, calls_remaining: int, interval_seconds: int | None) -> None:
+    """S3: 自走ループ(候補スキャン→[自走が有効ならpublish自動承認]→実行→受注取得→
+
+    supplier_purchase提案[承認待ちで停止]→承認済みがあれば発注→tracking同期)を1回、または
+    `--interval-seconds`指定時は定期的に実行する。
+
+    安全既定: `--live`を付けない限りdry-run(何も外部へ送信しない)。`settings.autonomy_enabled`
+    (`.env`の`AUTONOMY_ENABLED`)がFalse(既定)の間は自動承認が一切行われないため、実行される
+    副作用は「この呼び出しより前に人間が承認済みだった提案」だけになる。緊急停止は
+    `AUTONOMY_KILL_SWITCH=true`で即座に反映される(次回tick以降、自動承認が止まる)。
+
+    受注取得→supplier_purchase提案の生成は、Shopify注文からPOD原価を引くカタログ統合が
+    このコードベースにまだ無いため(DECISIONS.md参照)、既定では行わない(このコマンドからは
+    `order_to_items`を渡していない)。
+    """
+    from ebay_dropship.channels import create_channel
+    from ebay_dropship.orchestrator.autopilot import run_autopilot_cycle
+
+    if demo_mode:
+        from ebay_dropship.demo import (
+            build_demo_act_tasks,
+            build_demo_plan_tasks,
+            build_demo_supplier,
+        )
+
+        supplier = build_demo_supplier(settings)
+        plan_tasks = build_demo_plan_tasks(settings)
+        act_tasks = build_demo_act_tasks(settings, supplier)
+    else:
+        plan_tasks, act_tasks = [], []
+
+    def _tick() -> None:
+        channel = create_channel(settings)
+        with _session() as session:
+            repo = SqlProposalRepository(session)
+            result = run_autopilot_cycle(
+                repository=repo,
+                channel=channel,
+                settings=settings,
+                calls_remaining=calls_remaining,
+                plan_tasks=plan_tasks,
+                act_tasks=act_tasks,
+                dry_run=not live,
+                notifier=LoggingNotifier(),
+            )
+        click.echo(
+            f"plan: enqueued={len(result.plan.plan_enqueued) + len(result.plan.act_enqueued)} | "
+            f"auto_approved={len(result.auto_approved)} | "
+            f"do: ok={sum(1 for r in result.do_results if isinstance(r, Proposal))} "
+            f"failed={sum(1 for r in result.do_results if isinstance(r, Exception))} | "
+            f"pending_supplier_purchase={result.pending_supplier_purchase_count} | "
+            f"errors={len(result.errors)}"
+        )
+        for exc in result.errors:
+            click.echo(f"  error: {exc}", err=True)
+
+    if interval_seconds:
+        from apscheduler.schedulers.blocking import BlockingScheduler
+
+        from ebay_dropship.orchestrator.scheduler import CycleScheduler
+
+        cycle_scheduler = CycleScheduler(_tick)
+        scheduler = BlockingScheduler()
+        scheduler.add_job(cycle_scheduler.tick, "interval", seconds=interval_seconds)
+        click.echo(
+            f"{interval_seconds}秒間隔で自走ループを開始します"
+            f"(autonomy_enabled={settings.autonomy_enabled}, kill_switch={settings.autonomy_kill_switch}, "
+            f"live={live})。Ctrl+Cで停止。"
+        )
+        try:
+            scheduler.start()
+        except (KeyboardInterrupt, SystemExit):
+            pass
+    else:
+        _tick()
+
+
 @cli.group()
 def demo() -> None:
     """実キー・実発注を使わない安全なデモ用コマンド(README「Quickstart(デモ)」参照)。"""
